@@ -3,13 +3,21 @@
 Verwandelt einen [GeekMagic SmallTV-Ultra](https://github.com/GeekMagicClock/smalltv-ultra)
 (ESP8266, 1.5" IPS, 240×240) in ein Live-Status-Display für Claude Code:
 
-| Claude-State | Cube zeigt | Auto-Revert |
-|---|---|---|
-| SessionStart | `idle.gif` | — |
-| Prompt abgesendet, denkt | `thinking.gif` | — |
-| Notification (Idle-Wartung etc.) | `alert.gif` | nach 12 s → idle |
-| Permission-Anfrage | `alert.gif` (permission mode) | nach 30 s → idle |
-| Antwort fertig | `idle.gif` | — |
+| Claude-Hook | Cube zeigt | Auto-Revert | peon-ping Kategorie |
+|---|---|---|---|
+| `SessionStart` | `idle.gif` | — | `session.start` |
+| `UserPromptSubmit` (Prompt rein, denkt) | `thinking.gif` | — | `task.acknowledge` |
+| `Stop` (Antwort fertig) | `idle.gif` | — | `task.complete` |
+| `Notification` | `alert.gif` | 30 s → idle | (varies) |
+| `PermissionRequest` | `alert.gif` (permission) | 0 (forever, bis User handelt) | `input.required` |
+| `PostToolUseFailure` (Bash) | `alert.gif` (error) | 30 s → idle | `task.error` |
+| `PreCompact` (Kontext voll) | `alert.gif` (compact) | 30 s → idle | `resource.limit` |
+| `SessionEnd` | `idle.gif` | — | (cleanup) |
+
+Permission revert ist absichtlich 0 — Claude ist bis zur User-Reaktion blockiert,
+ein Auto-Revert auf `idle` wäre irreführend. Hooks-Set spiegelt 1:1 das von
+[peon-ping](https://github.com/) (Audio-Sibling), so dass Cube und Sound im
+Gleichschritt feuern.
 
 ### Skin-Preview
 
@@ -26,10 +34,19 @@ Die Animationen sind Pixel-Art Maskottchen, generiert per [PixelLab.ai](https://
 
 ## Funktionsweise
 
-Claude Code feuert Hooks (`UserPromptSubmit`, `Stop`, `Notification`, `PermissionRequest`).
-Jeder Hook ruft `cube.sh <state>` auf, welches per HTTP `GET /set?img=/image/<state>.gif`
-das passende GIF anzeigt. Non-blocking: bei toter Cube läuft Claude unverändert weiter
-(2s curl-Timeout + `exit 0`).
+Claude Code feuert Hooks (`SessionStart/End`, `UserPromptSubmit`, `Stop`, `Notification`,
+`PermissionRequest`, `PostToolUseFailure`, `PreCompact`). Jeder Hook ruft
+`cube.sh <state>` auf, welches per HTTP `GET /set?img=/image/<state>.gif` das
+passende GIF anzeigt. Non-blocking: bei toter Cube läuft Claude unverändert
+weiter (2s curl-Timeout + `exit 0`).
+
+**Multi-Session-aware:** Cube.sh liest `session_id` aus dem Hook-Stdin-JSON
+(via `jq`) und tracked Zustand **pro Session** in `/tmp/.cube-sessions-$UID.json`.
+Bei mehreren parallelen Claude-Sessions wird der Display-Zustand per Priorität
+aggregiert: `permission > error > compact > thinking > alert > idle`. Beispiel:
+Session A denkt, Session B beendet — Cube bleibt auf `thinking`. Session A
+beendet → Cube auf `idle`. Stale Sessions (>1 h kein Update) werden geprunet.
+Auto-Revert ist TOCTOU-sicher via Per-Session Seq-Counter.
 
 ```
 ┌─────────────────────────┐  GET /set?img=...   ┌──────────────────────┐
@@ -107,9 +124,12 @@ make cycle            # visueller Test
 
 ```bash
 bin/cube.sh thinking         # state-gif, gleich für orb/waifu (über skin)
-bin/cube.sh alert            # auto-revert nach CUBE_ALERT_REVERT s (default 12)
-bin/cube.sh permission       # längeres revert CUBE_PERMISSION_REVERT s (default 30)
+bin/cube.sh alert            # auto-revert nach CUBE_ALERT_REVERT s (default 30)
+bin/cube.sh permission       # auto-revert CUBE_PERMISSION_REVERT s (default 0 = forever)
+bin/cube.sh error            # PostToolUseFailure-Variante, revert via CUBE_ERROR_REVERT
+bin/cube.sh compact          # PreCompact-Variante, revert via CUBE_COMPACT_REVERT
 bin/cube.sh idle
+bin/cube.sh end              # Session aus Map evicten (für SessionEnd-Hook)
 bin/cube.sh skin             # show current skin
 bin/cube.sh skin waifu       # switch to waifu (or "orb")
 bin/cube.sh img foo.gif      # beliebige Datei in /image/
@@ -122,10 +142,17 @@ bin/cube.sh ping             # Connectivity-Check (exit 1 on fail)
 
 **Env-Tweaks:**
 ```bash
-CUBE_ALERT_REVERT=6 cube.sh alert       # kürzer
+CUBE_ALERT_REVERT=60 cube.sh alert      # länger (default 30 s)
 CUBE_ALERT_REVERT=0 cube.sh alert       # disabled (alert bleibt forever)
+CUBE_PERMISSION_REVERT=60 cube.sh permission   # default 0 = forever
+CUBE_ERROR_REVERT=10 cube.sh error      # default = CUBE_ALERT_REVERT
+CUBE_SESSION_TTL=600 cube.sh ...        # stale-prune nach 10 min (default 3600)
+CUBE_SESSIONS_FILE=/tmp/foo.json …      # alternativer State-Store (für Tests)
 CUBE_SKIN=orb cube.sh thinking          # einmaliger skin-override
 ```
+
+`cube.sh info` zeigt alle live Sessions mit State, Seq und Age + den
+aggregierten Display-Winner.
 
 Oder in Claude Code via Slash-Command: `/cube thinking|alert|idle|...`
 
@@ -154,22 +181,30 @@ In `~/.claude/settings.json` sind unter `hooks` folgende Einträge **additiv** e
 (bestehende Peon-Ping Hooks bleiben unangetastet):
 
 ```json
-"UserPromptSubmit": [ ..., {"matcher": "", "hooks": [
-  {"type": "command", "command": "~/.claude/bin/cube.sh thinking",
-   "timeout": 3, "async": true}
-]}],
-"Stop":             [ ..., {"matcher": "", "hooks": [
+"SessionStart":      [ ..., {"matcher": "", "hooks": [
   {"type": "command", "command": "~/.claude/bin/cube.sh idle",
-   "timeout": 3, "async": true}
-]}],
-"Notification":     [ ..., {"matcher": "", "hooks": [
+   "timeout": 3, "async": true}]}],
+"SessionEnd":        [ ..., {"matcher": "", "hooks": [
+  {"type": "command", "command": "~/.claude/bin/cube.sh end",
+   "timeout": 3, "async": true}]}],
+"UserPromptSubmit":  [ ..., {"matcher": "", "hooks": [
+  {"type": "command", "command": "~/.claude/bin/cube.sh thinking",
+   "timeout": 3, "async": true}]}],
+"Stop":              [ ..., {"matcher": "", "hooks": [
+  {"type": "command", "command": "~/.claude/bin/cube.sh idle",
+   "timeout": 3, "async": true}]}],
+"Notification":      [ ..., {"matcher": "", "hooks": [
   {"type": "command", "command": "~/.claude/bin/cube.sh alert",
-   "timeout": 3, "async": true}
-]}],
-"PermissionRequest":[ ..., {"matcher": "", "hooks": [
-  {"type": "command", "command": "~/.claude/bin/cube.sh alert",
-   "timeout": 3, "async": true}
-]}]
+   "timeout": 3, "async": true}]}],
+"PermissionRequest": [ ..., {"matcher": "", "hooks": [
+  {"type": "command", "command": "~/.claude/bin/cube.sh permission",
+   "timeout": 3, "async": true}]}],
+"PostToolUseFailure":[ ..., {"matcher": "Bash", "hooks": [
+  {"type": "command", "command": "~/.claude/bin/cube.sh error",
+   "timeout": 3, "async": true}]}],
+"PreCompact":        [ ..., {"matcher": "", "hooks": [
+  {"type": "command", "command": "~/.claude/bin/cube.sh compact",
+   "timeout": 3, "async": true}]}]
 ```
 
 Backup vor Änderungen liegt unter `~/.claude/settings.json.bak-*`.
@@ -177,6 +212,9 @@ Backup vor Änderungen liegt unter `~/.claude/settings.json.bak-*`.
 ## Requirements
 
 - `bash`, `curl` — überall da
+- `jq` — Session-ID-Extraktion aus Hook-Stdin (`sudo apt install jq`)
+- `python3` — Atomic State-File Mutation (i.d.R. vorinstalliert)
+- `flock` (`util-linux`, vorinstalliert) — File-Locking für concurrent hooks
 - `gifsicle` — für Resize 128 → 240 (`sudo apt install gifsicle`)
 - `python3-pil python3-requests` — nur falls `cube-gen.py` benutzt wird (optional)
 - Claude Code mit Hooks-Support
