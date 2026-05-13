@@ -5,16 +5,16 @@
 # Multi-session aware: tracks state per Claude session_id (extracted from hook
 # stdin JSON via jq). Aggregates by priority across all live sessions and
 # pushes the winner GIF. Priority:
-#   permission > error > compact > thinking > alert > idle
+#   permission > error > compact > done > thinking > alert > idle
 #
 # State file: /tmp/.cube-sessions-$UID.json  (atomic via flock + temp+rename)
 #   {"sessions": {"<sid>": {"state": "...", "ts": ..., "seq": N}},
 #    "displayed": "...", "displayed_ts": ...}
 # Stale entries pruned after CUBE_SESSION_TTL (default 3600s).
 #
-# Auto-revert: alert/permission/error/compact schedule a per-session revert
-# that fires after N seconds. TOCTOU-safe via seq counter — if the session
-# moved on (seq advanced), revert is a no-op.
+# Auto-revert: alert/permission/error/compact/done schedule a per-session
+# revert that fires after N seconds. TOCTOU-safe via seq counter — if the
+# session moved on (seq advanced), revert is a no-op.
 #
 # Skins: filename prefix selects mascot set. Stored in ~/.claude/.cube-skin.
 #   orb    -> thinking.gif / alert.gif / idle.gif        (default)
@@ -35,16 +35,26 @@ ALERT_REVERT="${CUBE_ALERT_REVERT:-30}"
 PERMISSION_REVERT="${CUBE_PERMISSION_REVERT:-0}"
 ERROR_REVERT="${CUBE_ERROR_REVERT:-$ALERT_REVERT}"
 COMPACT_REVERT="${CUBE_COMPACT_REVERT:-$ALERT_REVERT}"
+DONE_REVERT="${CUBE_DONE_REVERT:-5}"
 CURL=(curl -fsS -m "$TIMEOUT")
 
 skin_get() { cat "$SKIN_FILE" 2>/dev/null || echo orb; }
 prefix() { case "$(skin_get)" in waifu) echo "waifu_" ;; *) echo "" ;; esac; }
 
 gif_for() {
-  case "$1" in
-    thinking)                       echo "$(prefix)thinking.gif" ;;
-    alert|permission|error|compact) echo "$(prefix)alert.gif" ;;
-    *)                              echo "$(prefix)idle.gif" ;;
+  local state="$1" pfx
+  pfx="$(prefix)"
+  # waifu skin has dedicated permission/error/compact GIFs; orb still falls back to alert.gif
+  if [[ "$pfx" == "waifu_" ]]; then
+    case "$state" in
+      thinking|alert|permission|error|compact|done|idle) echo "${pfx}${state}.gif"; return ;;
+    esac
+  fi
+  case "$state" in
+    thinking)                       echo "${pfx}thinking.gif" ;;
+    alert|permission|error|compact) echo "${pfx}alert.gif" ;;
+    done)                           echo "${pfx}done.gif" ;;
+    *)                              echo "${pfx}idle.gif" ;;
   esac
 }
 
@@ -86,7 +96,7 @@ if op == "update":
     data["sessions"][sid] = {"state": new_state, "ts": now, "seq": seq_out}
 elif op == "evict":
     data["sessions"].pop(sid, None)
-PRIO = {"permission": 5, "error": 4, "compact": 3, "thinking": 2, "alert": 1, "idle": 0}
+PRIO = {"permission": 5, "error": 4, "compact": 3, "done": 2.5, "thinking": 2, "alert": 1, "idle": 0}
 if data["sessions"]:
     winner = max(data["sessions"].values(),
                  key=lambda v: PRIO.get(v.get("state", "idle"), 0))["state"]
@@ -143,6 +153,7 @@ show() {
     permission) delay="$PERMISSION_REVERT" ;;
     error)      delay="$ERROR_REVERT" ;;
     compact)    delay="$COMPACT_REVERT" ;;
+    done)       delay="$DONE_REVERT" ;;
   esac
   schedule_revert "$sid" "$seq" "$delay"
 }
@@ -156,7 +167,7 @@ end_session() {
 }
 
 case "${1:-}" in
-  thinking|alert|permission|error|compact|idle) show "$1" ;;
+  thinking|alert|permission|error|compact|done|idle) show "$1" ;;
   end)        end_session ;;
   img)        "${CURL[@]}" "http://$CUBE_IP/set?img=/image/${2:-}" >/dev/null 2>&1 || true ;;
   theme)      "${CURL[@]}" "http://$CUBE_IP/set?theme=${2:-1}" >/dev/null 2>&1 || true ;;
@@ -213,16 +224,17 @@ PY
 cube.sh — Geekmagic SmallTV-Ultra controller (multi-session aware)
 
 Usage: $0 <command> [arg]
-  thinking | alert | permission | error | compact | idle
+  thinking | alert | permission | error | compact | done | idle
                                Per-session state. session_id is read from hook
                                stdin JSON (jq); manual CLI maps to "cli".
                                Aggregated across all live sessions by priority:
-                                 permission > error > compact > thinking > alert > idle
+                                 permission > error > compact > done > thinking > alert > idle
                                Auto-revert (per-session, TOCTOU-safe via seq):
                                  alert      after CUBE_ALERT_REVERT s   (30)
                                  permission after CUBE_PERMISSION_REVERT s (0 = forever)
                                  error      after CUBE_ERROR_REVERT s   (= alert)
                                  compact    after CUBE_COMPACT_REVERT s (= alert)
+                                 done       after CUBE_DONE_REVERT s    (5)
   end                          Evict current session_id (used by SessionEnd).
   img <filename>               Show image (session-agnostic).
   skin [orb|waifu]             Get / set mascot skin.
@@ -235,7 +247,7 @@ Usage: $0 <command> [arg]
 Hook mapping (mirrors peon-ping):
   SessionStart              -> idle
   UserPromptSubmit          -> thinking
-  Stop                      -> idle
+  Stop                      -> done
   SessionEnd                -> end
   Notification              -> alert
   PermissionRequest         -> permission
@@ -249,7 +261,8 @@ Env: CUBE_IP (required; or .env / ~/.config/cube/config),
      CUBE_SESSION_TTL (default 3600 seconds — stale-session prune),
      CUBE_ALERT_REVERT (default 30; 0 = forever),
      CUBE_PERMISSION_REVERT (default 0 = forever),
-     CUBE_ERROR_REVERT / CUBE_COMPACT_REVERT (default = ALERT_REVERT)
+     CUBE_ERROR_REVERT / CUBE_COMPACT_REVERT (default = ALERT_REVERT),
+     CUBE_DONE_REVERT (default 5)
 EOF
     ;;
 esac

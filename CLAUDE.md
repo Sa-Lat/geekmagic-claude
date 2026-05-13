@@ -11,7 +11,7 @@ The README is in German; this file is the English working reference.
 ## Architecture, in three pieces
 
 1. **`bin/cube.sh`** — the only runtime component. Single bash script that hooks invoke. Designed to never block Claude: 2s curl timeout, swallows all errors, always `exit 0`. **Multi-session aware:** reads `session_id` from hook stdin JSON (jq), tracks per-session state in `/tmp/.cube-sessions-$UID.json` (atomic via flock + python3 + temp+rename), and aggregates across sessions by priority: `permission > error > compact > thinking > alert > idle`. Per-session `seq` counter makes auto-revert TOCTOU-safe — a stale revert never stomps an active session. Stale sessions (>`CUBE_SESSION_TTL`s, default 3600) pruned on every write. **Skins** (`orb` / `waifu`) are a client-side filename prefix stored in `~/.claude/.cube-skin`; both skins' GIFs live on the cube simultaneously.
-2. **Asset pipeline** — 128×128 source GIFs from PixelLab.ai live in `assets/`. `resize.sh` (gifsicle nearest-neighbor) blows them up to `assets/240/`, then `upload.sh` POSTs multipart to `/doUpload?dir=/image/`. Resize uses `--resize-method=sample` deliberately — pixel art must not be smoothed.
+2. **Asset pipeline** — pixel-art source GIFs from PixelLab.ai live in `assets/` (typically 128×128 or 256×256). `resize.sh` (gifsicle `--resize-method=sample`, nearest-neighbor) normalizes them to 240×240 in `assets/240/`, then `upload.sh` POSTs multipart to `/doUpload?dir=/image/`. Sample-resize is deliberate — pixel art must not be smoothed. With no args, `resize.sh` writes to `assets/240/`; with explicit args, it writes `240-<name>` next-to-source (move manually if you need them in `240/`). Asset-prompt docs per skin live in `prompts/` (`waifu-skin.md`, `yuri-skin.md`).
 3. **Deploy** — `deploy.sh` copies `bin/cube.sh` (+ optional `cube-gen.py` Pillow fallback) into `~/.claude/bin/` where the hooks reference it. The repo is the source of truth; `~/.claude/bin/cube.sh` is a deployed artifact.
 
 Hooks themselves are configured in `~/.claude/settings.json` outside this repo (README §"Claude-Code Hook-Setup" shows the JSON).
@@ -27,15 +27,15 @@ Hook → cube subcommand → peon category:
 | `SessionStart` | `idle` | `session.start` |
 | `SessionEnd` | `end` (evicts session_id) | cleanup |
 | `UserPromptSubmit` | `thinking` | `task.acknowledge` |
-| `Stop` | `idle` | `task.complete` |
+| `Stop` | `done` (5s revert) | `task.complete` |
 | `Notification` | `alert` (30s revert) | (varies) |
 | `PermissionRequest` | `permission` (no revert) | `input.required` |
 | `PostToolUseFailure` matcher `Bash` | `error` (30s revert) | `task.error` |
 | `PreCompact` | `compact` (30s revert) | `resource.limit` |
 
-`error` and `compact` are distinct **state labels** sharing `alert.gif`. Distinct labels matter so the auto-revert background job doesn't stomp a newer state with `idle` when reverts overlap. When adding dedicated assets, give them their own GIF and keep the label as-is.
+`gif_for` in `cube.sh` is **skin-aware**: the `waifu` skin has dedicated GIFs for all seven states (`waifu_permission.gif`, `waifu_error.gif`, `waifu_compact.gif`, `waifu_done.gif`). The `orb` skin still falls back — `permission|error|compact` all resolve to `alert.gif`. Distinct state labels matter regardless of asset: they keep the auto-revert background job from stomping a newer state with `idle` when reverts overlap. When adding dedicated orb assets, drop them next to the others and extend the waifu-branch of `gif_for` to cover orb as well.
 
-When adding new states or hooks: only the six `show`-routed states (`thinking|alert|permission|error|compact|idle`) and `end` touch the sessions map. `img`/`theme`/`brt`/`list`/`skin`/`info`/`ping` are session-agnostic passthroughs — don't route them through `update_session`. Manual invocations from a terminal map to session_id `cli`, which behaves like any other session.
+When adding new states or hooks: only the seven `show`-routed states (`thinking|alert|permission|error|compact|done|idle`) and `end` touch the sessions map. `img`/`theme`/`brt`/`list`/`skin`/`info`/`ping` are session-agnostic passthroughs — don't route them through `update_session`. Manual invocations from a terminal map to session_id `cli`, which behaves like any other session.
 
 Peon-ping has features the cube does not (yet): runtime enable/disable toggle, per-category mute, pack rotation, IDE/path rules. Don't port these blindly — visual signal is binary in a way audio isn't. Add only if a real workflow asks.
 
@@ -49,7 +49,7 @@ Every script resolves `CUBE_IP` in this order: env var → `~/.config/cube/confi
 make ping              # is the cube reachable at $CUBE_IP?
 make info              # device version, theme, free space, current skin/state
 make status            # local assets/ + assets/240/ + remote /image/ listing
-make resize            # 128→240 for everything in assets/
+make resize            # 128/256 → 240 for everything in assets/
 make upload            # push assets/240/*.gif to cube
 make all               # resize + upload
 make deploy            # install cube.sh + cube-gen.py to ~/.claude/bin/
@@ -60,7 +60,7 @@ make clear-old FORCE=1 # actually delete
 
 Direct cube control (also works deployed as `~/.claude/bin/cube.sh`):
 ```bash
-bin/cube.sh thinking|alert|permission|idle    # state GIFs (skin-aware)
+bin/cube.sh thinking|alert|permission|error|compact|done|idle    # state GIFs (skin-aware)
 bin/cube.sh skin [orb|waifu]                  # get/set mascot
 bin/cube.sh img <file>                        # show arbitrary uploaded file
 bin/cube.sh theme <1-7>                       # 3 = Photo Album (what we need)
@@ -82,12 +82,13 @@ These **all fail** on current firmware — don't bother adding features that use
 Other gotchas:
 - "Auto Switch Themes" in the device web-UI will overwrite hook-set images. Must be disabled in the cube settings, not workaroundable in code.
 - Upload curl emits a "duplicate Content-Length" warning — firmware bug, upload succeeds anyway. Don't try to silence with `-f` cleverness.
-- Max practical GIF: ~50 KB, ≤8 frames. Bigger and the cube hangs.
+- GIF budget is soft: docs target ≤50 KB / ≤8 frames, but the cube has handled 100–160 KB / 12–18 frames per file in practice. Total `/image/` storage is ~3 MB — `make info` to check free space before bulk uploads, `make clear-old` to prune.
 
 ## When changing `cube.sh`
 
-- Keep it non-blocking. New states should follow the `show <label> <file>` pattern and write to `$STATE_FILE` so auto-revert logic stays coherent.
-- Adding a third auto-revert state? Generalize `schedule_revert` rather than copy-pasting the alert/permission branches.
+- Keep it non-blocking. New states should follow the `show <label> <file>` pattern and write per-session state so auto-revert logic stays coherent.
+- Auto-revert delays are env-driven (`CUBE_{ALERT,PERMISSION,ERROR,COMPACT,DONE}_REVERT`); when adding a new revertable state, extend `schedule_revert` and the env list together rather than hard-coding a delay.
+- When adding a new skin, extend both `prefix()` and the waifu-branch of `gif_for()` — and make sure the asset set covers all seven labels (or accept the alert.gif fallback like `orb` currently does).
 - After editing, run `make deploy` — the live hook script is `~/.claude/bin/cube.sh`, not the repo copy.
 
 ## Requirements
