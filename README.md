@@ -83,6 +83,8 @@ cube/
 │   ├── resize.sh         ← 128/256 → 240×240 via gifsicle, per-skin
 │   ├── upload.sh         ← POST GIFs an Cube /doUpload, prefix-translation
 │   ├── contrast-fix.py   ← Pillow Sat/Con/Sharp pro Frame (Brauen-Rescue)
+│   ├── cube-watchdog.sh  ← Polling-Daemon, redisplay nach Cube-Reboot
+│   ├── cube-watchdog.service ← systemd --user Unit (optional)
 │   ├── deploy.sh         ← Sync bin/cube.sh* → ~/.claude/bin/
 │   ├── cycle.sh          ← Visueller Smoke-Test
 │   └── clear-old.sh      ← Räumt Cube auf (Dry-run + --force)
@@ -146,6 +148,7 @@ make cycle            # visueller Test
 
 ```bash
 bin/cube.sh thinking         # state-gif, gleich für orb/waifu (über skin)
+bin/cube.sh redisplay        # re-push aggregierten state (kein session-mutate)
 bin/cube.sh alert            # auto-revert nach CUBE_ALERT_REVERT s (default 30)
 bin/cube.sh permission       # auto-revert CUBE_PERMISSION_REVERT s (default 0 = forever)
 bin/cube.sh error            # PostToolUseFailure-Variante, revert via CUBE_ERROR_REVERT
@@ -230,6 +233,40 @@ In `~/.claude/settings.json` sind unter `hooks` folgende Einträge **additiv** e
 ```
 
 Backup vor Änderungen liegt unter `~/.claude/settings.json.bak-*`.
+
+## Cube-Watchdog (Recovery nach Reboot)
+
+Cube-Firmware bietet kein "Boot-Image" Setting. Wenn der Cube selbst neu startet
+(Power-Cycle, Crash, Firmware-Update), zeigt er bis zum nächsten Hook-Fire ein
+zufälliges Bild aus seinem Speicher. `bin/cube-watchdog.sh` läuft als
+Long-Running-Process, pollt alle 15 s die Erreichbarkeit, und schiebt bei
+offline → online Transition `cube.sh redisplay` raus — das re-aggregiert den
+aktuellen Session-State (oder `idle` wenn keine Sessions live).
+
+```bash
+make deploy   # legt cube-watchdog.sh nach ~/.claude/bin/
+```
+
+Als systemd --user Service (empfohlen):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp bin/cube-watchdog.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now cube-watchdog
+systemctl --user status cube-watchdog        # check
+journalctl --user -u cube-watchdog -f        # follow logs
+```
+
+Alternative ohne systemd:
+
+```bash
+nohup ~/.claude/bin/cube-watchdog.sh > ~/.claude/cube-watchdog.log 2>&1 &
+```
+
+**Env-Tweaks**:
+- `CUBE_WATCHDOG_INTERVAL=30` — Poll-Intervall (default 15 s)
+- `CUBE_WATCHDOG_PING_TIMEOUT=5` — curl-Timeout pro Probe (default 3 s)
 
 ## Requirements
 

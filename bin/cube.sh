@@ -168,9 +168,27 @@ end_session() {
   push "$winner"
 }
 
+redisplay() {
+  # Re-push current aggregated display state without mutating session map.
+  # Used by the watchdog after a cube reboot to restore a known image.
+  local winner
+  winner=$(python3 - "$SESSIONS_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print("idle")
+    sys.exit()
+print(d.get("displayed", "idle"))
+PY
+)
+  push "${winner:-idle}"
+}
+
 case "${1:-}" in
   thinking|alert|permission|error|compact|done|idle) show "$1" ;;
   end)        end_session ;;
+  redisplay)  redisplay ;;
   img)        "${CURL[@]}" "http://$CUBE_IP/set?img=/image/${2:-}" >/dev/null 2>&1 || true ;;
   theme)      "${CURL[@]}" "http://$CUBE_IP/set?theme=${2:-1}" >/dev/null 2>&1 || true ;;
   brt)        "${CURL[@]}" "http://$CUBE_IP/set?brt=${2:-50}"  >/dev/null 2>&1 || true ;;
@@ -238,6 +256,8 @@ Usage: $0 <command> [arg]
                                  compact    after CUBE_COMPACT_REVERT s (= alert)
                                  done       after CUBE_DONE_REVERT s    (5)
   end                          Evict current session_id (used by SessionEnd).
+  redisplay                    Re-push current aggregated state (no mutation).
+                               Used by cube-watchdog after device reboot.
   img <filename>               Show image (session-agnostic).
   skin [orb|waifu]             Get / set mascot skin.
   theme <1-7>                  1 Weather, 3 Album, 7 Simple.
