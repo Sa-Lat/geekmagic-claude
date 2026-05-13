@@ -3,9 +3,10 @@
 Zweiter Maskottchen-Skin neben Magical-Girl-Pink. Yuri-Style: shy academic,
 dark purple hair, ein Auge von Pony verdeckt, gentle violet gaze, Schuluniform.
 
-Wenn fertig: Files `yuri_thinking.gif` / `yuri_alert.gif` / `yuri_idle.gif` in
-`assets/` ablegen. Danach `bin/cube.sh` um `skin yuri` Option erweitern (siehe
-unten).
+Wenn fertig: Files `thinking.gif` / `alert.gif` / `idle.gif` (+ optional alle
+7 states) in `assets/yuri/` ablegen. `resize.sh` und `upload.sh` entdecken den
+neuen Ordner automatisch; nur `bin/cube.sh` muss um `skin yuri` Option erweitert
+werden (siehe unten).
 
 ## Base-Prompt (PixelLab Character Creator, 128×128 bust-up)
 

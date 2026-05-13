@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-# Visual smoke-test: cycle through thinking → alert → idle on the Cube.
-# Usage: cycle.sh [delay_seconds]   # default 5
+# Visual smoke-test: cycle through all 7 status states on the Cube.
+# Usage: cycle.sh [delay_seconds]   # default 4
+#        cycle.sh short             # only thinking/alert/idle (legacy 3-state)
 set -euo pipefail
 
-DELAY="${1:-5}"
 CUBE="$(dirname "$0")/cube.sh"
 
-for state in thinking alert idle; do
-  printf "%-9s " "$state"
+if [[ "${1:-}" == "short" ]]; then
+  STATES=(thinking alert idle)
+  DELAY=5
+else
+  STATES=(thinking alert permission error compact done idle)
+  DELAY="${1:-4}"
+fi
+
+for state in "${STATES[@]}"; do
+  printf "%-11s " "$state"
   "$CUBE" "$state"
   echo "(showing for ${DELAY}s)"
   sleep "$DELAY"

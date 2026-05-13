@@ -16,9 +16,11 @@
 # revert that fires after N seconds. TOCTOU-safe via seq counter — if the
 # session moved on (seq advanced), revert is a no-op.
 #
-# Skins: filename prefix selects mascot set. Stored in ~/.claude/.cube-skin.
-#   orb    -> thinking.gif / alert.gif / idle.gif        (default)
-#   waifu  -> waifu_thinking.gif / waifu_alert.gif / waifu_idle.gif
+# Skins: selector stored in ~/.claude/.cube-skin. Cube-side files are flat:
+#   orb    -> /image/<state>.gif         (no prefix, legacy default)
+#   waifu  -> /image/waifu_<state>.gif   (and dedicated permission/error/compact/done)
+# Local sources are organized per-skin (assets/<skin>/<state>.gif); upload.sh
+# translates to the flat cube convention since /image/ has no subdir support.
 #
 # Deprecated: CUBE_STATE_FILE (legacy single-label file, no longer used).
 

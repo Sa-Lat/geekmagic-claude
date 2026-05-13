@@ -10,8 +10,8 @@ The README is in German; this file is the English working reference.
 
 ## Architecture, in three pieces
 
-1. **`bin/cube.sh`** — the only runtime component. Single bash script that hooks invoke. Designed to never block Claude: 2s curl timeout, swallows all errors, always `exit 0`. **Multi-session aware:** reads `session_id` from hook stdin JSON (jq), tracks per-session state in `/tmp/.cube-sessions-$UID.json` (atomic via flock + python3 + temp+rename), and aggregates across sessions by priority: `permission > error > compact > thinking > alert > idle`. Per-session `seq` counter makes auto-revert TOCTOU-safe — a stale revert never stomps an active session. Stale sessions (>`CUBE_SESSION_TTL`s, default 3600) pruned on every write. **Skins** (`orb` / `waifu`) are a client-side filename prefix stored in `~/.claude/.cube-skin`; both skins' GIFs live on the cube simultaneously.
-2. **Asset pipeline** — pixel-art source GIFs from PixelLab.ai live in `assets/` (typically 128×128 or 256×256). `resize.sh` (gifsicle `--resize-method=sample`, nearest-neighbor) normalizes them to 240×240 in `assets/240/`, then `upload.sh` POSTs multipart to `/doUpload?dir=/image/`. Sample-resize is deliberate — pixel art must not be smoothed. With no args, `resize.sh` writes to `assets/240/`; with explicit args, it writes `240-<name>` next-to-source (move manually if you need them in `240/`). Asset-prompt docs per skin live in `prompts/` (`waifu-skin.md`, `yuri-skin.md`).
+1. **`bin/cube.sh`** — the only runtime component. Single bash script that hooks invoke. Designed to never block Claude: 2s curl timeout, swallows all errors, always `exit 0`. **Multi-session aware:** reads `session_id` from hook stdin JSON (jq), tracks per-session state in `/tmp/.cube-sessions-$UID.json` (atomic via flock + python3 + temp+rename), and aggregates across sessions by priority: `permission > error > compact > thinking > alert > idle`. Per-session `seq` counter makes auto-revert TOCTOU-safe — a stale revert never stomps an active session. Stale sessions (>`CUBE_SESSION_TTL`s, default 3600) pruned on every write. **Skins** (`orb` / `waifu`) are a client-side selector stored in `~/.claude/.cube-skin`; locally each skin's source GIFs live in `assets/<skin>/`, on the cube they coexist as flat files using the legacy prefix convention (orb keeps unprefixed names, others get `<skin>_<state>.gif`).
+2. **Asset pipeline** — pixel-art source GIFs from PixelLab.ai live in **per-skin subdirs**: `assets/<skin>/<state>.gif` (typically 128×128 or 256×256). `resize.sh` (gifsicle `--resize-method=sample`, nearest-neighbor) normalizes them to 240×240 in `assets/240/<skin>/<state>.gif`. `upload.sh` then POSTs multipart to `/doUpload?dir=/image/` and **translates the filename** — orb files upload as `<state>.gif` (no prefix, legacy), others as `<skin>_<state>.gif` — because the firmware does not navigate subdirectories under `/image/`. Sample-resize is deliberate — pixel art must not be smoothed. `bin/contrast-fix.py` (Pillow Sat/Con/Sharp per-frame + no-dither quantize) optionally rescues 1-2px dark detail (eyebrows, eyelashes) from cube-quantization loss in mono-palette skins like `waifu`. Asset-prompt docs per skin live in `prompts/` (`waifu-skin.md`, `yuri-skin.md`).
 3. **Deploy** — `deploy.sh` copies `bin/cube.sh` (+ optional `cube-gen.py` Pillow fallback) into `~/.claude/bin/` where the hooks reference it. The repo is the source of truth; `~/.claude/bin/cube.sh` is a deployed artifact.
 
 Hooks themselves are configured in `~/.claude/settings.json` outside this repo (README §"Claude-Code Hook-Setup" shows the JSON).
@@ -49,8 +49,10 @@ Every script resolves `CUBE_IP` in this order: env var → `~/.config/cube/confi
 make ping              # is the cube reachable at $CUBE_IP?
 make info              # device version, theme, free space, current skin/state
 make status            # local assets/ + assets/240/ + remote /image/ listing
-make resize            # 128/256 → 240 for everything in assets/
-make upload            # push assets/240/*.gif to cube
+make resize            # 128/256 → 240 per-skin (assets/<skin>/ → assets/240/<skin>/)
+                       # bin/resize.sh <skin> to scope to one skin
+make upload            # push assets/240/<skin>/*.gif to cube (flat, prefix-translated)
+                       # bin/upload.sh <skin> to scope to one skin
 make all               # resize + upload
 make deploy            # install cube.sh + cube-gen.py to ~/.claude/bin/
 make cycle             # visual smoke-test: thinking → alert → idle (5s each)
@@ -88,7 +90,7 @@ Other gotchas:
 
 - Keep it non-blocking. New states should follow the `show <label> <file>` pattern and write per-session state so auto-revert logic stays coherent.
 - Auto-revert delays are env-driven (`CUBE_{ALERT,PERMISSION,ERROR,COMPACT,DONE}_REVERT`); when adding a new revertable state, extend `schedule_revert` and the env list together rather than hard-coding a delay.
-- When adding a new skin, extend both `prefix()` and the waifu-branch of `gif_for()` — and make sure the asset set covers all seven labels (or accept the alert.gif fallback like `orb` currently does).
+- When adding a new skin: create `assets/<skin>/` with the seven state-named GIFs (or fewer + accept the alert.gif fallback like `orb`), extend both `prefix()` and the waifu-branch of `gif_for()`. `resize.sh` and `upload.sh` discover skins automatically by directory scan — no script change needed.
 - After editing, run `make deploy` — the live hook script is `~/.claude/bin/cube.sh`, not the repo copy.
 
 ## Requirements

@@ -7,12 +7,12 @@ Verwandelt einen [GeekMagic SmallTV-Ultra](https://github.com/GeekMagicClock/sma
 |---|---|---|---|
 | `SessionStart` | `idle.gif` | — | `session.start` |
 | `UserPromptSubmit` (Prompt rein, denkt) | `thinking.gif` | — | `task.acknowledge` |
-| `Stop` (Antwort fertig) | `idle.gif` | — | `task.complete` |
+| `Stop` (Antwort fertig) | `done.gif` | 5 s → idle | `task.complete` |
 | `Notification` | `alert.gif` | 30 s → idle | (varies) |
-| `PermissionRequest` | `alert.gif` (permission) | 0 (forever, bis User handelt) | `input.required` |
-| `PostToolUseFailure` (Bash) | `alert.gif` (error) | 30 s → idle | `task.error` |
-| `PreCompact` (Kontext voll) | `alert.gif` (compact) | 30 s → idle | `resource.limit` |
-| `SessionEnd` | `idle.gif` | — | (cleanup) |
+| `PermissionRequest` | `permission.gif` (waifu) / `alert.gif` (orb) | 0 (forever, bis User handelt) | `input.required` |
+| `PostToolUseFailure` (Bash) | `error.gif` (waifu) / `alert.gif` (orb) | 30 s → idle | `task.error` |
+| `PreCompact` (Kontext voll) | `compact.gif` (waifu) / `alert.gif` (orb) | 30 s → idle | `resource.limit` |
+| `SessionEnd` | (Session-Eviction) | — | (cleanup) |
 
 Permission revert ist absichtlich 0 — Claude ist bis zur User-Reaktion blockiert,
 ein Auto-Revert auf `idle` wäre irreführend. Hooks-Set spiegelt 1:1 das von
@@ -21,16 +21,29 @@ Gleichschritt feuern.
 
 ### Skin-Preview
 
-| Skin | thinking | alert | idle |
+| Skin | thinking | alert | idle | done |
+|---|:---:|:---:|:---:|:---:|
+| **orb** | <img src="assets/240/orb/thinking.gif" width="120" alt="orb thinking"> | <img src="assets/240/orb/alert.gif" width="120" alt="orb alert"> | <img src="assets/240/orb/idle.gif" width="120" alt="orb idle"> | <img src="assets/240/orb/done.gif" width="120" alt="orb done"> |
+| **waifu** | <img src="assets/240/waifu/thinking.gif" width="120" alt="waifu thinking"> | <img src="assets/240/waifu/alert.gif" width="120" alt="waifu alert"> | <img src="assets/240/waifu/idle.gif" width="120" alt="waifu idle"> | <img src="assets/240/waifu/done.gif" width="120" alt="waifu done"> |
+
+Waifu hat zusätzlich dedizierte `permission` / `error` / `compact` GIFs (orb
+fällt für diese States auf `alert.gif` zurück):
+
+| Skin | permission | error | compact |
 |---|:---:|:---:|:---:|
-| **orb** | <img src="assets/240/thinking.gif" width="140" alt="orb thinking"> | <img src="assets/240/alert.gif" width="140" alt="orb alert"> | <img src="assets/240/idle.gif" width="140" alt="orb idle"> |
-| **waifu** | <img src="assets/240/waifu_thinking.gif" width="140" alt="waifu thinking"> | <img src="assets/240/waifu_alert.gif" width="140" alt="waifu alert"> | <img src="assets/240/waifu_idle.gif" width="140" alt="waifu idle"> |
+| **waifu** | <img src="assets/240/waifu/permission.gif" width="120" alt="waifu permission"> | <img src="assets/240/waifu/error.gif" width="120" alt="waifu error"> | <img src="assets/240/waifu/compact.gif" width="120" alt="waifu compact"> |
 
-`cube.sh skin <orb|waifu>` schaltet zwischen den Maskottchen-Sets. Files für
-beide bleiben auf dem Cube, switch ist client-seitiges Filename-Prefixing.
+`cube.sh skin <orb|waifu>` schaltet zwischen den Sets. Files für beide Skins
+liegen parallel auf dem Cube; gewählt wird client-seitig in `cube.sh`. Lokal
+trennen die Quellen sich in `assets/<skin>/<state>.gif` — beim Upload
+übersetzt `upload.sh` auf die flache Cube-Konvention (`<state>.gif` für orb,
+`<skin>_<state>.gif` sonst), da die Firmware in `/image/` keine Subdirs
+navigiert.
 
-Die Animationen sind Pixel-Art Maskottchen, generiert per [PixelLab.ai](https://www.pixellab.ai)
-(Prompts in `prompts/`).
+Pixel-Art generiert per [PixelLab.ai](https://www.pixellab.ai), per-Skin
+Prompts in `prompts/<skin>-skin.md`, zusätzlich Sat-15 / Con+45 / Sharp+50
+Post-Process via `bin/contrast-fix.py` zur Rettung der 1-2px Wimpern/Brauen
+durch Cube-Quantize.
 
 ## Funktionsweise
 
@@ -67,22 +80,26 @@ cube/
 ├── bin/
 │   ├── cube.sh           ← Haupt-CLI (wird nach ~/.claude/bin/ deployed)
 │   ├── cube-gen.py       ← Pillow-Placeholder-Generator (optional)
-│   ├── resize.sh         ← 128×128 → 240×240 via gifsicle
-│   ├── upload.sh         ← POST GIFs an Cube /doUpload
+│   ├── resize.sh         ← 128/256 → 240×240 via gifsicle, per-skin
+│   ├── upload.sh         ← POST GIFs an Cube /doUpload, prefix-translation
+│   ├── contrast-fix.py   ← Pillow Sat/Con/Sharp pro Frame (Brauen-Rescue)
 │   ├── deploy.sh         ← Sync bin/cube.sh* → ~/.claude/bin/
 │   ├── cycle.sh          ← Visueller Smoke-Test
 │   └── clear-old.sh      ← Räumt Cube auf (Dry-run + --force)
 ├── assets/
-│   ├── thinking.gif      ← 128×128 Source (von PixelLab)
-│   ├── alert.gif         ← 128×128 Source
-│   ├── idle.gif          ← 128×128 Source
-│   └── 240/              ← 240×240 hochskaliert (was auf Cube läuft)
+│   ├── orb/              ← orb-skin source GIFs (thinking/alert/idle/done)
+│   ├── waifu/            ← waifu-skin source GIFs (alle 7 states)
+│   └── 240/
+│       ├── orb/          ← orb 240×240 hochskaliert
+│       └── waifu/        ← waifu 240×240 hochskaliert
 └── prompts/
-    ├── 00-style-guide.md ← Maskottchen-Design + Palette
-    ├── 01-thinking.md    ← Asset-Prompts für thinking-Animation
-    ├── 02-alert.md
-    ├── 03-idle.md
-    └── 04-workflow.md    ← End-to-End Frames → GIF → Cube
+    ├── 00-style-guide.md ← orb-Maskottchen-Design + Palette
+    ├── 01-thinking.md    ← Asset-Prompts für thinking-Animation (orb)
+    ├── 02-alert.md       ← (orb)
+    ├── 03-idle.md        ← (orb)
+    ├── 04-workflow.md    ← End-to-End Frames → GIF → Cube
+    ├── waifu-skin.md     ← Magical-Girl-Pink skin: alle 7 states
+    └── yuri-skin.md      ← Yuri-Style skin (geplant, noch keine Assets)
 ```
 
 ## Setup
@@ -113,12 +130,17 @@ make cycle            # visueller Test
 ## Workflow: neue Animation hinzufügen
 
 1. **Generieren** in [PixelLab.ai Character Creator + Animate](https://www.pixellab.ai)
-   - Action Descriptions und Style-Anchor aus `prompts/01-thinking.md` etc. übernehmen
-   - 64×64 oder 128×128 (Credits sparen)
-   - Export als GIF nach `assets/<name>.gif`
-2. **Resize**: `make resize` → erzeugt `assets/240/<name>.gif`
-3. **Upload**: `make upload` → schickt an Cube `/image/`
-4. **Test**: `make cycle` oder `bin/cube.sh img <name>.gif`
+   - Action Descriptions und Style-Anchor aus `prompts/<skin>-skin.md` übernehmen
+   - 64×64, 128×128 oder 256×256 (Credits sparen)
+   - Export als GIF nach `assets/<skin>/<state>.gif`
+     z.B. `assets/waifu/permission.gif`
+2. **(Optional) Contrast-fix** falls Brauen/Wimpern bei mono-Palette wegquantizen:
+   `bin/contrast-fix.py assets/<skin>/<state>.gif /tmp/out.gif && mv /tmp/out.gif assets/<skin>/<state>.gif`
+3. **Resize**: `make resize` → erzeugt `assets/240/<skin>/<state>.gif`
+   - oder gezielt: `bin/resize.sh waifu`
+4. **Upload**: `make upload` → schickt an Cube `/image/` mit prefix-translation
+   - orb: `<state>.gif`, sonst `<skin>_<state>.gif`
+5. **Test**: `make cycle` oder `bin/cube.sh <state>` (skin via `cube.sh skin <name>`)
 
 ## Manuelle Cube-Steuerung
 
@@ -215,8 +237,9 @@ Backup vor Änderungen liegt unter `~/.claude/settings.json.bak-*`.
 - `jq` — Session-ID-Extraktion aus Hook-Stdin (`sudo apt install jq`)
 - `python3` — Atomic State-File Mutation (i.d.R. vorinstalliert)
 - `flock` (`util-linux`, vorinstalliert) — File-Locking für concurrent hooks
-- `gifsicle` — für Resize 128 → 240 (`sudo apt install gifsicle`)
-- `python3-pil python3-requests` — nur falls `cube-gen.py` benutzt wird (optional)
+- `gifsicle` — für Resize 128/256 → 240 (`sudo apt install gifsicle`)
+- `python3-pil` — für `bin/contrast-fix.py` (Sat/Con/Sharp Rescue für mono-Palette skins). `sudo apt install python3-pil`
+- `python3-requests` — optional, nur für `cube-gen.py` (Placeholder-Generator)
 - Claude Code mit Hooks-Support
 
 ## Tweaks (Cube selbst)
@@ -234,7 +257,8 @@ Backup vor Änderungen liegt unter `~/.claude/settings.json.bak-*`.
 | Symptom | Fix |
 |---|---|
 | Cube zeigt "no images" trotz Upload | Reboot via `bin/cube.sh` (kein Direkt-Befehl; nutze `curl "http://CUBE/set?reboot=1"`) |
-| Bild nur ¼ des Displays | GIF ist 128×128, `make resize` ausführen |
+| Bild nur ¼ des Displays | GIF ist 128×128 (oder 256×256 unaligned), `make resize` ausführen |
+| Brauen/Wimpern werden weiß bei waifu-Skin | `bin/contrast-fix.py` auf source applizieren, dann resize+upload |
 | Hooks feuern nicht | Neue Claude-Session starten — Hooks werden bei Session-Start gelesen |
 | "Auto Switch Themes" überschreibt Hook-Bilder | http://$CUBE_IP/ → Auto-Switch deaktivieren |
 | Upload-curl bricht mit "duplicate Content-Length" ab | Cube-FW-Bug, Upload klappt trotzdem — `-f` flag bei curl entfernt sich beschwert nicht |

@@ -178,8 +178,10 @@ Aus `04-workflow.md` Recipe für alle waifu-Assets:
 1. https://ezgif.com/effects → Replace transparency mit `#ffd1f3`
 2. **Saturation −10, Contrast +30** — rettet Wimpernlinien
 3. Apply, Export
-4. `assets/waifu_<state>.gif` ablegen
-5. `make resize && make upload`
+4. `assets/waifu/<state>.gif` ablegen (per-skin Ordner)
+5. **Optional** `bin/contrast-fix.py` (Sat-15 / Con+45 / Sharp+50) wenn Brauen
+   beim Cube-Quantize wegfallen — siehe README §Workflow
+6. `make resize && make upload` (upload.sh übersetzt zu `waifu_<state>.gif` auf cube)
 
 **Achtung error/compact/permission**: Diese haben Zweitfarbe (blau / violett /
 rot-cross) — Color-Reduction auf min. **32 Indices** bei `gifsicle -O3
@@ -203,16 +205,21 @@ rot-cross) — Color-Reduction auf min. **32 Indices** bei `gifsicle -O3
 # 2. ezgif.com/maker → GIF mit Delay aus Tabelle
 # 3. ezgif post-process (transparency replace + Sat/Con)
 # 4. Ablage:
-cp ~/Downloads/waifu_permission.gif assets/
-make resize        # → assets/240/waifu_permission.gif
-make upload        # → cube /image/waifu_permission.gif
+cp ~/Downloads/permission.gif assets/waifu/
+# 4b. Optional contrast-fix (rettet 1-2px Brauen/Wimpern bei mono-pink):
+bin/contrast-fix.py assets/waifu/permission.gif /tmp/fixed.gif && \
+  mv /tmp/fixed.gif assets/waifu/permission.gif
+# 5. Resize + upload:
+make resize        # → assets/240/waifu/permission.gif
+make upload        # → cube /image/waifu_permission.gif (prefix-translation)
 bin/cube.sh skin waifu
 bin/cube.sh permission   # smoke-test
 ```
 
 ## Integration-Check
 
-`bin/cube.sh` ruft `${prefix}${state}.gif` auf. Solange Files exakt
-`waifu_permission.gif` / `waifu_error.gif` / `waifu_compact.gif` /
-`waifu_done.gif` heißen, kein Code-Change nötig — `show` routet bereits
-alle 7 States über `prefix`.
+`bin/cube.sh` löst alle 7 States für skin `waifu` zu `waifu_<state>.gif` auf
+und lädt sie via `/set?img=/image/<file>`. `upload.sh` macht beim Push die
+prefix-translation von `assets/240/waifu/<state>.gif` zur cube-flat-Konvention
+automatisch. Solange Source-Files genau `assets/waifu/{thinking,alert,permission,
+error,compact,done,idle}.gif` heißen, kein Code-Change nötig.

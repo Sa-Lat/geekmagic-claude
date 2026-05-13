@@ -17,8 +17,8 @@ help:
 	@echo "Targets:"
 	@echo "  make ping        - check device reachable at $(CUBE_IP)"
 	@echo "  make info        - dump device version + state + free space"
-	@echo "  make resize      - 128x128 -> 240x240 (gifsicle nearest-neighbor)"
-	@echo "  make upload      - push resized GIFs to /image/ on cube"
+	@echo "  make resize      - 128/256 -> 240x240 per skin (gifsicle nearest-neighbor)"
+	@echo "  make upload      - push assets/240/<skin>/*.gif to cube (flat, with prefix translation)"
 	@echo "  make all         - resize + upload"
 	@echo "  make deploy      - install cube.sh + cube-gen.py to ~/.claude/bin/"
 	@echo "  make cycle       - visual smoke-test: thinking -> alert -> idle"
@@ -54,11 +54,18 @@ else
 endif
 
 status:
-	@echo "=== local assets/ ==="
-	@ls -la $(ASSETS_128)/*.gif 2>/dev/null || echo "  (none)"
+	@echo "=== local assets/<skin>/ ==="
+	@for d in $(ASSETS_128)/*/; do \
+		case $$d in *240/) continue;; esac; \
+		echo "[$$d]"; \
+		ls -la $$d*.gif 2>/dev/null || echo "  (none)"; \
+	done
 	@echo
-	@echo "=== local assets/240/ ==="
-	@ls -la $(ASSETS_240)/*.gif 2>/dev/null || echo "  (none)"
+	@echo "=== local assets/240/<skin>/ ==="
+	@for d in $(ASSETS_240)/*/; do \
+		echo "[$$d]"; \
+		ls -la $$d*.gif 2>/dev/null || echo "  (none)"; \
+	done
 	@echo
 	@echo "=== cube /image/ ==="
 	@curl -fsS -m 5 "http://$(CUBE_IP)/filelist?dir=/image/" \
