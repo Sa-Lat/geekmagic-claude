@@ -4,6 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
+EnvironmentFile=-%h/.config/cube/config
 ExecStart=/usr/bin/python3 %h/.claude/bin/mock-cube.py --assets %h/projects/cube/assets
 Restart=on-failure
 RestartSec=5

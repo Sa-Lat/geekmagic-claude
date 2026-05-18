@@ -5,6 +5,7 @@ endpoints so cube.sh / hooks can run without the physical device.
 Endpoints:
   GET  /set?img=&theme=&brt=   state-set (mirrors what cube.sh push() sends)
   GET  /state.json             current state (for cube-overlay polling)
+  GET  /dashboard.json         state + cwd of winning session + 5h-usage pct
   GET  /current.gif            resolved local source asset for STATE.img
   GET  /v.json /app.json /space.json   minimal mock JSON
   GET  /filelist?dir=/image/   HTML list of available assets
@@ -17,10 +18,14 @@ Then point cube.sh at it (parallel to real cube):
   CUBE_MIRROR=127.0.0.1:8080
 """
 import argparse
+import glob
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -28,6 +33,86 @@ from urllib.parse import urlparse, parse_qs
 STATE = {"img": "/image/idle.gif", "state": "idle", "theme": 3, "brt": 50, "ts": 0.0}
 ASSETS_DIR = None  # set in main()
 KNOWN_STATES = {"idle", "thinking", "alert", "permission", "error", "compact", "done"}
+
+SESSIONS_FILE = f"/tmp/.cube-sessions-{os.getuid()}.json"
+USAGE_TTL = 30  # seconds — ccusage subprocess is slow, cache hard
+USAGE_ARGS = ["blocks", "--json", "--active", "--token-limit", "max"]
+_USAGE = {"ts": 0.0, "pct": None, "refreshing": False, "lock": threading.Lock()}
+
+
+def _find_ccusage_cmd():
+    """Resolve the ccusage invocation. Order: explicit env override, npx in
+    PATH, then nvm install dirs (systemd --user services don't see ~/.nvm)."""
+    override = os.environ.get("CUBE_CCUSAGE_CMD")
+    if override:
+        return override.split()
+    npx = shutil.which("npx")
+    if not npx:
+        cands = sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/npx")),
+                       reverse=True)
+        npx = next((c for c in cands if os.access(c, os.X_OK)), None)
+    if not npx:
+        return None
+    return [npx, "-y", "ccusage@latest"]
+
+
+def _read_displayed_cwd():
+    try:
+        with open(SESSIONS_FILE) as f:
+            d = json.load(f)
+    except Exception:
+        return ""
+    return os.path.basename((d.get("displayed_cwd") or "").rstrip("/"))
+
+
+def _refresh_usage():
+    pct = None
+    cmd = _find_ccusage_cmd()
+    if cmd is None:
+        sys.stderr.write("ccusage: npx not found (set CUBE_CCUSAGE_CMD or install node)\n")
+    else:
+        # npx shebang is `#!/usr/bin/env node` — ensure the resolved npx's
+        # sibling `node` is on PATH (systemd --user PATH excludes nvm).
+        env = os.environ.copy()
+        env["PATH"] = f"{os.path.dirname(cmd[0])}:{env.get('PATH', '')}"
+        try:
+            out = subprocess.run(cmd + USAGE_ARGS, capture_output=True, text=True, timeout=60, env=env)
+            if out.returncode == 0 and out.stdout:
+                blocks = (json.loads(out.stdout).get("blocks") or [])
+                if blocks:
+                    # tokenLimitStatus.percentUsed is projection (burnRate * remainingMinutes).
+                    # We want actual current usage, so divide raw totalTokens by the
+                    # plan-specific token limit. ccusage's --token-limit max picks
+                    # the highest historical block — that rarely matches Anthropic's
+                    # actual Max-plan quota, so CUBE_USAGE_TOKEN_LIMIT can override.
+                    tls = blocks[0].get("tokenLimitStatus") or {}
+                    total = blocks[0].get("totalTokens")
+                    limit_env = os.environ.get("CUBE_USAGE_TOKEN_LIMIT")
+                    limit = int(limit_env) if limit_env else tls.get("limit")
+                    if total and limit:
+                        pct = int(round(total / limit * 100))
+            else:
+                sys.stderr.write(f"ccusage rc={out.returncode}: {out.stderr[:200]}\n")
+        except Exception as e:
+            sys.stderr.write(f"ccusage refresh failed: {e}\n")
+    with _USAGE["lock"]:
+        _USAGE["pct"] = pct
+        _USAGE["ts"] = time.time()
+        _USAGE["refreshing"] = False
+
+
+def _read_usage_pct():
+    """Return cached 5h-window usage percent. Refreshes asynchronously when
+    cache is older than USAGE_TTL so the GET request never blocks on ccusage."""
+    now = time.time()
+    with _USAGE["lock"]:
+        fresh = (now - _USAGE["ts"]) < USAGE_TTL
+        pct = _USAGE["pct"]
+        if not fresh and not _USAGE["refreshing"]:
+            _USAGE["refreshing"] = True
+            _USAGE["ts"] = now  # tentative — prevent thundering herd
+            threading.Thread(target=_refresh_usage, daemon=True).start()
+    return pct
 
 
 def derive_state(img_path):
@@ -90,6 +175,11 @@ class H(BaseHTTPRequestHandler):
             return self._send("OK")
         if u.path == "/state.json":
             return self._json(STATE)
+        if u.path == "/dashboard.json":
+            payload = dict(STATE)
+            payload["cwd"] = _read_displayed_cwd()
+            payload["usage_5h_pct"] = _read_usage_pct()
+            return self._json(payload)
         if u.path == "/current.gif":
             p = resolve_local(STATE["img"])
             if p:

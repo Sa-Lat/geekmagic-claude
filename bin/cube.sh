@@ -38,6 +38,10 @@ PERMISSION_REVERT="${CUBE_PERMISSION_REVERT:-0}"
 ERROR_REVERT="${CUBE_ERROR_REVERT:-$ALERT_REVERT}"
 COMPACT_REVERT="${CUBE_COMPACT_REVERT:-$ALERT_REVERT}"
 DONE_REVERT="${CUBE_DONE_REVERT:-5}"
+# Stop hook fires after the post-compact recap message. Suppress that `done`
+# blip if `compact` was seen in this session within RECAP_WINDOW seconds.
+# 0 = disable suppression. Cleared on next `thinking` (real user turn).
+RECAP_WINDOW="${CUBE_RECAP_WINDOW:-60}"
 CURL=(curl -fsS -m "$TIMEOUT")
 # Comma-separated host[:port] list; every state-mutation is fanned out here in
 # addition to $CUBE_IP. Real cube failures are already silent — same for mirrors.
@@ -76,51 +80,93 @@ gif_for() {
   esac
 }
 
-session_id_from_stdin() {
-  if [[ -t 0 ]]; then echo cli; return; fi
-  local sid
-  sid=$(jq -r '.session_id // .conversation_id // "cli"' 2>/dev/null) || sid=cli
-  echo "${sid:-cli}"
+# Parse hook stdin JSON into (sid, cwd) in one shot. Stdin is consumed exactly
+# once by the caller and passed as the sole argument — avoids stdin-already-eaten
+# bugs from running multiple `$(...)` subshells against the same pipe.
+parse_hook() {
+  local hook_in="$1"
+  if [[ -z "$hook_in" ]]; then
+    printf 'cli\t'
+    return
+  fi
+  python3 - "$hook_in" <<'PY' 2>/dev/null || printf 'cli\t'
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    print("cli\t"); sys.exit()
+sid = d.get("session_id") or d.get("conversation_id") or "cli"
+cwd = d.get("cwd") or ""
+print(f"{sid}\t{cwd}")
+PY
 }
 
 push() {
   fan_set "img=/image/$(gif_for "$1")"
 }
 
-# mutate <op> <sid> [<new_state>]
+# mutate <op> <sid> [<new_state> [<cwd>]]
 #   op=update  -> upsert session slot, bump seq
 #   op=evict   -> remove session
-# Prints "<winner>\t<seq>" (seq is '-' for evict). Atomic via flock + temp+rename.
+# Prints "<winner>\t<seq>" (seq is '-' for evict, -1 for recap-suppressed).
+# Atomic via flock + temp+rename.
 mutate() {
-  local op="$1" sid="$2" new_state="${3:-idle}"
+  local op="$1" sid="$2" new_state="${3:-idle}" cwd="${4:-}"
   mkdir -p "$(dirname "$SESSIONS_FILE")" 2>/dev/null || true
   exec 9>"$SESSIONS_FILE.lock"
   flock -x 9 2>/dev/null || true
-  python3 - "$SESSIONS_FILE" "$op" "$sid" "$new_state" "$SESSION_TTL" <<'PY'
+  python3 - "$SESSIONS_FILE" "$op" "$sid" "$new_state" "$SESSION_TTL" "$RECAP_WINDOW" "$cwd" <<'PY'
 import json, os, sys, tempfile, time
-path, op, sid, new_state, ttl = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+path, op, sid, new_state = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+ttl, recap_window = int(sys.argv[5]), int(sys.argv[6])
+cwd = sys.argv[7] if len(sys.argv) > 7 else ""
 try:
     with open(path) as f:
         data = json.load(f)
 except (OSError, ValueError):
-    data = {"sessions": {}, "displayed": "idle", "displayed_ts": 0}
+    data = {"sessions": {}, "displayed": "idle", "displayed_cwd": "", "displayed_ts": 0}
 now = time.time()
 data["sessions"] = {k: v for k, v in (data.get("sessions") or {}).items()
                     if now - v.get("ts", 0) < ttl}
 seq_out = "-"
 if op == "update":
     prev = data["sessions"].get(sid, {})
-    seq_out = prev.get("seq", 0) + 1
-    data["sessions"][sid] = {"state": new_state, "ts": now, "seq": seq_out}
+    # Recap suppression: `done` shortly after `compact` is the post-compact
+    # recap Stop. Skip — no state change, no seq bump. Compact's own revert
+    # timer (already running) handles return to idle.
+    if (new_state == "done" and recap_window > 0
+            and prev.get("compact_ts")
+            and now - prev["compact_ts"] < recap_window):
+        prev = dict(prev)
+        prev.pop("compact_ts", None)
+        data["sessions"][sid] = prev
+        seq_out = -1
+    else:
+        seq_out = prev.get("seq", 0) + 1
+        entry = {"state": new_state, "ts": now, "seq": seq_out}
+        if new_state == "compact":
+            entry["compact_ts"] = now
+        elif new_state != "thinking" and "compact_ts" in prev:
+            entry["compact_ts"] = prev["compact_ts"]
+        # cwd carries forward unless a new one is supplied
+        if cwd:
+            entry["cwd"] = cwd
+        elif "cwd" in prev:
+            entry["cwd"] = prev["cwd"]
+        data["sessions"][sid] = entry
 elif op == "evict":
     data["sessions"].pop(sid, None)
 PRIO = {"permission": 5, "error": 4, "compact": 3, "done": 2.5, "thinking": 2, "alert": 1, "idle": 0}
 if data["sessions"]:
-    winner = max(data["sessions"].values(),
-                 key=lambda v: PRIO.get(v.get("state", "idle"), 0))["state"]
+    winner_entry = max(data["sessions"].values(),
+                       key=lambda v: PRIO.get(v.get("state", "idle"), 0))
+    winner = winner_entry["state"]
+    winner_cwd = winner_entry.get("cwd", "")
 else:
     winner = "idle"
+    winner_cwd = ""
 data["displayed"] = winner
+data["displayed_cwd"] = winner_cwd
 data["displayed_ts"] = now
 d = os.path.dirname(path) or "."
 fd, tmp = tempfile.mkstemp(dir=d, prefix=".cube-", suffix=".tmp")
@@ -160,11 +206,14 @@ print(v.get("seq", ""))
 }
 
 show() {
-  local new_state="$1" sid out winner seq delay=0
-  sid=$(session_id_from_stdin)
-  out=$(mutate update "$sid" "$new_state")
+  local new_state="$1" hook_in="" sid cwd out winner seq delay=0
+  [[ -t 0 ]] || hook_in=$(cat)
+  IFS=$'\t' read -r sid cwd < <(parse_hook "$hook_in")
+  out=$(mutate update "$sid" "$new_state" "$cwd")
   winner="${out%%$'\t'*}"
   seq="${out##*$'\t'}"
+  # seq=-1 signals recap suppression — no push, no revert scheduling.
+  [[ "$seq" == "-1" ]] && return 0
   push "$winner"
   case "$new_state" in
     alert)      delay="$ALERT_REVERT" ;;
@@ -177,8 +226,9 @@ show() {
 }
 
 end_session() {
-  local sid out winner
-  sid=$(session_id_from_stdin)
+  local hook_in="" sid cwd out winner
+  [[ -t 0 ]] || hook_in=$(cat)
+  IFS=$'\t' read -r sid cwd < <(parse_hook "$hook_in")
   out=$(mutate evict "$sid")
   winner="${out%%$'\t'*}"
   push "$winner"
@@ -237,14 +287,16 @@ except Exception:
     print("(no sessions file)")
     sys.exit()
 now = time.time()
-print(f"displayed: {d.get('displayed','idle')}")
+import os as _os
+print(f"displayed: {d.get('displayed','idle')}  cwd={_os.path.basename((d.get('displayed_cwd') or '').rstrip('/'))}")
 sessions = d.get("sessions") or {}
 if not sessions:
     print("(no live sessions)")
 else:
     for sid, v in sessions.items():
         age = int(now - v.get("ts", 0))
-        print(f"  {sid[:8]:<8}  {v.get('state',''):<10}  seq={v.get('seq','?'):>3}  age={age}s")
+        cwd_b = _os.path.basename((v.get("cwd") or "").rstrip("/"))
+        print(f"  {sid[:8]:<8}  {v.get('state',''):<10}  seq={v.get('seq','?'):>3}  age={age}s  cwd={cwd_b}")
 PY
     ;;
   ping)
@@ -300,7 +352,8 @@ Env: CUBE_IP (required; or .env / ~/.config/cube/config),
      CUBE_ALERT_REVERT (default 30; 0 = forever),
      CUBE_PERMISSION_REVERT (default 0 = forever),
      CUBE_ERROR_REVERT / CUBE_COMPACT_REVERT (default = ALERT_REVERT),
-     CUBE_DONE_REVERT (default 5)
+     CUBE_DONE_REVERT (default 5),
+     CUBE_RECAP_WINDOW (default 60s; 0 = off — suppresses post-compact done)
 EOF
     ;;
 esac
