@@ -9,7 +9,7 @@ BIN := ./bin
 ASSETS_128 := assets
 ASSETS_240 := assets/240
 
-.PHONY: help ping info resize upload deploy cycle clear-old all status
+.PHONY: help ping info resize upload deploy cycle clear-old all status mock overlay dev-install
 
 help:
 	@echo "cube — Geekmagic SmallTV-Ultra status display"
@@ -25,6 +25,11 @@ help:
 	@echo "  make clear-old   - dry-run delete-everything-except-status-gifs on cube"
 	@echo "                     (add FORCE=1 to actually delete)"
 	@echo "  make status      - show local assets + cube file listing"
+	@echo
+	@echo "Dev mode (no hardware):"
+	@echo "  make mock        - run local HTTP mock-cube (foreground)"
+	@echo "  make overlay     - run frameless Tk overlay window (foreground)"
+	@echo "  make dev-install - install + enable systemd --user units for mock + overlay"
 
 ping:
 	@$(BIN)/cube.sh ping
@@ -52,6 +57,18 @@ ifeq ($(FORCE),1)
 else
 	@$(BIN)/clear-old.sh
 endif
+
+mock:
+	@$(BIN)/mock-cube.py
+
+overlay:
+	@$(BIN)/cube-overlay.py --frameless
+
+dev-install:
+	@$(BIN)/deploy.sh
+	@systemctl --user daemon-reload
+	@systemctl --user enable --now mock-cube cube-overlay
+	@systemctl --user status mock-cube cube-overlay --no-pager -n 3
 
 status:
 	@echo "=== local assets/<skin>/ ==="

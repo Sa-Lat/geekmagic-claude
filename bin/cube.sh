@@ -39,6 +39,22 @@ ERROR_REVERT="${CUBE_ERROR_REVERT:-$ALERT_REVERT}"
 COMPACT_REVERT="${CUBE_COMPACT_REVERT:-$ALERT_REVERT}"
 DONE_REVERT="${CUBE_DONE_REVERT:-5}"
 CURL=(curl -fsS -m "$TIMEOUT")
+# Comma-separated host[:port] list; every state-mutation is fanned out here in
+# addition to $CUBE_IP. Real cube failures are already silent — same for mirrors.
+CUBE_MIRROR="${CUBE_MIRROR:-}"
+
+# fan_set <query_suffix>  — fire /set?<suffix> to real cube + every mirror.
+# All failures swallowed; non-blocking by design.
+fan_set() {
+  local suffix="$1" tgt
+  "${CURL[@]}" "http://$CUBE_IP/set?$suffix" >/dev/null 2>&1 || true
+  if [[ -n "$CUBE_MIRROR" ]]; then
+    local IFS=','
+    for tgt in $CUBE_MIRROR; do
+      "${CURL[@]}" "http://$tgt/set?$suffix" >/dev/null 2>&1 || true
+    done
+  fi
+}
 
 skin_get() { cat "$SKIN_FILE" 2>/dev/null || echo orb; }
 prefix() { case "$(skin_get)" in waifu) echo "waifu_" ;; *) echo "" ;; esac; }
@@ -68,7 +84,7 @@ session_id_from_stdin() {
 }
 
 push() {
-  "${CURL[@]}" "http://$CUBE_IP/set?img=/image/$(gif_for "$1")" >/dev/null 2>&1 || true
+  fan_set "img=/image/$(gif_for "$1")"
 }
 
 # mutate <op> <sid> [<new_state>]
@@ -189,9 +205,9 @@ case "${1:-}" in
   thinking|alert|permission|error|compact|done|idle) show "$1" ;;
   end)        end_session ;;
   redisplay)  redisplay ;;
-  img)        "${CURL[@]}" "http://$CUBE_IP/set?img=/image/${2:-}" >/dev/null 2>&1 || true ;;
-  theme)      "${CURL[@]}" "http://$CUBE_IP/set?theme=${2:-1}" >/dev/null 2>&1 || true ;;
-  brt)        "${CURL[@]}" "http://$CUBE_IP/set?brt=${2:-50}"  >/dev/null 2>&1 || true ;;
+  img)        fan_set "img=/image/${2:-}" ;;
+  theme)      fan_set "theme=${2:-1}" ;;
+  brt)        fan_set "brt=${2:-50}" ;;
   list)       "${CURL[@]}" "http://$CUBE_IP/filelist?dir=/image/" 2>&1 || true ;;
   skin)
     case "${2:-}" in
