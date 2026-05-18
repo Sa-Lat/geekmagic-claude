@@ -52,7 +52,7 @@ def load_frames(gif_bytes, size):
     for f in ImageSequence.Iterator(img):
         rgba = f.convert("RGBA")
         if rgba.size != (size, size):
-            rgba = rgba.resize((size, size), Image.NEAREST)
+            rgba = rgba.resize((size, size), Image.LANCZOS)
         frames.append(rgba)
         durations.append(max(20, f.info.get("duration", 100)))
     return frames, durations

@@ -65,6 +65,7 @@ if [[ $# -eq 0 ]]; then
   shopt -s nullglob
   for d in "$DIR_240"/*/; do
     skin="$(basename "$d")"
+    [[ "$skin" == "desktop" ]] && continue
     echo "[$skin]"
     upload_skin "$skin"
   done

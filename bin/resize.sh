@@ -41,7 +41,7 @@ if [[ $# -eq 0 ]]; then
   shopt -s nullglob
   for d in "$SRC_DIR"/*/; do
     skin="$(basename "$d")"
-    [[ "$skin" == "240" ]] && continue
+    [[ "$skin" == "240" || "$skin" == "desktop" ]] && continue
     echo "[$skin]"
     resize_skin "$skin"
   done

@@ -5,16 +5,20 @@
 # Multi-session aware: tracks state per Claude session_id (extracted from hook
 # stdin JSON via jq). Aggregates by priority across all live sessions and
 # pushes the winner GIF. Priority:
-#   permission > error > compact > done > thinking > alert > idle
+#   permission > error > compact > done > thinking > alert > start > idle
 #
 # State file: /tmp/.cube-sessions-$UID.json  (atomic via flock + temp+rename)
-#   {"sessions": {"<sid>": {"state": "...", "ts": ..., "seq": N}},
+#   {"sessions": {"<sid>": {"state": "...", "ts": ..., "seq": N,
+#                            "prev_state": "thinking|idle"}},
 #    "displayed": "...", "displayed_ts": ...}
+# prev_state captured on entry to alert/error/compact = last stable state.
 # Stale entries pruned after CUBE_SESSION_TTL (default 3600s).
 #
-# Auto-revert: alert/permission/error/compact/done schedule a per-session
+# Auto-revert: alert/permission/error/compact/done/start schedule a per-session
 # revert that fires after N seconds. TOCTOU-safe via seq counter — if the
 # session moved on (seq advanced), revert is a no-op.
+# Revert target: alert/error/compact/permission -> prev_state (thinking/idle);
+#                done/start -> idle (hardcoded — task ended).
 #
 # Skins: selector stored in ~/.claude/.cube-skin. Cube-side files are flat:
 #   orb    -> /image/<state>.gif         (no prefix, legacy default)
@@ -33,11 +37,12 @@ TIMEOUT="${CUBE_TIMEOUT:-2}"
 SKIN_FILE="${CUBE_SKIN_FILE:-$HOME/.claude/.cube-skin}"
 SESSIONS_FILE="${CUBE_SESSIONS_FILE:-/tmp/.cube-sessions-$UID.json}"
 SESSION_TTL="${CUBE_SESSION_TTL:-3600}"
-ALERT_REVERT="${CUBE_ALERT_REVERT:-30}"
-PERMISSION_REVERT="${CUBE_PERMISSION_REVERT:-0}"
+ALERT_REVERT="${CUBE_ALERT_REVERT:-5}"
+PERMISSION_REVERT="${CUBE_PERMISSION_REVERT:-$ALERT_REVERT}"
 ERROR_REVERT="${CUBE_ERROR_REVERT:-$ALERT_REVERT}"
 COMPACT_REVERT="${CUBE_COMPACT_REVERT:-$ALERT_REVERT}"
 DONE_REVERT="${CUBE_DONE_REVERT:-5}"
+START_REVERT="${CUBE_START_REVERT:-$DONE_REVERT}"
 # Stop hook fires after the post-compact recap message. Suppress that `done`
 # blip if `compact` was seen in this session within RECAP_WINDOW seconds.
 # 0 = disable suppression. Cleared on next `thinking` (real user turn).
@@ -66,6 +71,8 @@ prefix() { case "$(skin_get)" in waifu) echo "waifu_" ;; *) echo "" ;; esac; }
 gif_for() {
   local state="$1" pfx
   pfx="$(prefix)"
+  # start is a visual alias for done (wave anim on SessionStart) — no own GIF.
+  [[ "$state" == "start" ]] && state="done"
   # waifu skin has dedicated permission/error/compact GIFs; orb still falls back to alert.gif
   if [[ "$pfx" == "waifu_" ]]; then
     case "$state" in
@@ -148,6 +155,18 @@ if op == "update":
             entry["compact_ts"] = now
         elif new_state != "thinking" and "compact_ts" in prev:
             entry["compact_ts"] = prev["compact_ts"]
+        # prev_state: captured on entry to transient states (alert/error/compact)
+        # so their revert restores the real working state, not blanket idle.
+        # Carry forward across chained transients (error->alert keeps thinking).
+        TRANSIENT = {"alert", "error", "compact", "permission"}
+        if new_state in TRANSIENT:
+            prev_st = prev.get("state")
+            if prev_st and prev_st not in TRANSIENT:
+                entry["prev_state"] = prev_st
+            elif prev.get("prev_state"):
+                entry["prev_state"] = prev["prev_state"]
+            else:
+                entry["prev_state"] = "idle"
         # cwd carries forward unless a new one is supplied
         if cwd:
             entry["cwd"] = cwd
@@ -156,7 +175,7 @@ if op == "update":
         data["sessions"][sid] = entry
 elif op == "evict":
     data["sessions"].pop(sid, None)
-PRIO = {"permission": 5, "error": 4, "compact": 3, "done": 2.5, "thinking": 2, "alert": 1, "idle": 0}
+PRIO = {"permission": 5, "error": 4, "compact": 3, "done": 2.5, "thinking": 2, "alert": 1, "start": 0.5, "idle": 0}
 if data["sessions"]:
     winner_entry = max(data["sessions"].values(),
                        key=lambda v: PRIO.get(v.get("state", "idle"), 0))
@@ -180,12 +199,14 @@ PY
 }
 
 schedule_revert() {
-  # schedule_revert <sid> <seq> <delay>
-  local sid="$1" seq="$2" delay="$3"
+  # schedule_revert <sid> <seq> <delay> [<target>]
+  # target: literal state (default "idle") or "@prev" to read prev_state
+  # from the session entry at fire time. @prev falls back to idle.
+  local sid="$1" seq="$2" delay="$3" target="${4:-idle}"
   (( delay > 0 )) || return 0
   (
     sleep "$delay"
-    local cur
+    local cur revert_to="$target"
     cur=$(python3 -c '
 import json, sys
 try:
@@ -196,8 +217,20 @@ v = (d.get("sessions") or {}).get(sys.argv[2]) or {}
 print(v.get("seq", ""))
 ' "$SESSIONS_FILE" "$sid" 2>/dev/null)
     if [[ "$cur" == "$seq" ]]; then
+      if [[ "$target" == "@prev" ]]; then
+        revert_to=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print("idle"); sys.exit()
+v = (d.get("sessions") or {}).get(sys.argv[2]) or {}
+print(v.get("prev_state", "idle"))
+' "$SESSIONS_FILE" "$sid" 2>/dev/null)
+        revert_to="${revert_to:-idle}"
+      fi
       local out winner
-      out=$(mutate update "$sid" idle)
+      out=$(mutate update "$sid" "$revert_to")
       winner="${out%%$'\t'*}"
       push "$winner"
     fi
@@ -206,7 +239,7 @@ print(v.get("seq", ""))
 }
 
 show() {
-  local new_state="$1" hook_in="" sid cwd out winner seq delay=0
+  local new_state="$1" hook_in="" sid cwd out winner seq delay=0 target=idle
   [[ -t 0 ]] || hook_in=$(cat)
   IFS=$'\t' read -r sid cwd < <(parse_hook "$hook_in")
   out=$(mutate update "$sid" "$new_state" "$cwd")
@@ -216,13 +249,14 @@ show() {
   [[ "$seq" == "-1" ]] && return 0
   push "$winner"
   case "$new_state" in
-    alert)      delay="$ALERT_REVERT" ;;
-    permission) delay="$PERMISSION_REVERT" ;;
-    error)      delay="$ERROR_REVERT" ;;
-    compact)    delay="$COMPACT_REVERT" ;;
+    alert)      delay="$ALERT_REVERT";      target="@prev" ;;
+    error)      delay="$ERROR_REVERT";      target="@prev" ;;
+    compact)    delay="$COMPACT_REVERT";    target="@prev" ;;
+    permission) delay="$PERMISSION_REVERT"; target="@prev" ;;
     done)       delay="$DONE_REVERT" ;;
+    start)      delay="$START_REVERT" ;;
   esac
-  schedule_revert "$sid" "$seq" "$delay"
+  schedule_revert "$sid" "$seq" "$delay" "$target"
 }
 
 end_session() {
@@ -252,7 +286,7 @@ PY
 }
 
 case "${1:-}" in
-  thinking|alert|permission|error|compact|done|idle) show "$1" ;;
+  thinking|alert|permission|error|compact|done|idle|start) show "$1" ;;
   end)        end_session ;;
   redisplay)  redisplay ;;
   img)        fan_set "img=/image/${2:-}" ;;
@@ -312,17 +346,19 @@ PY
 cube.sh — Geekmagic SmallTV-Ultra controller (multi-session aware)
 
 Usage: $0 <command> [arg]
-  thinking | alert | permission | error | compact | done | idle
+  thinking | alert | permission | error | compact | done | idle | start
                                Per-session state. session_id is read from hook
                                stdin JSON (jq); manual CLI maps to "cli".
                                Aggregated across all live sessions by priority:
-                                 permission > error > compact > done > thinking > alert > idle
+                                 permission > error > compact > done > thinking > alert > start > idle
+                               start = SessionStart wave (visual alias for done.gif).
                                Auto-revert (per-session, TOCTOU-safe via seq):
-                                 alert      after CUBE_ALERT_REVERT s   (30)
-                                 permission after CUBE_PERMISSION_REVERT s (0 = forever)
-                                 error      after CUBE_ERROR_REVERT s   (= alert)
-                                 compact    after CUBE_COMPACT_REVERT s (= alert)
-                                 done       after CUBE_DONE_REVERT s    (5)
+                                 alert      after CUBE_ALERT_REVERT s   (5) -> prev_state
+                                 permission after CUBE_PERMISSION_REVERT s (= alert) -> prev_state
+                                 error      after CUBE_ERROR_REVERT s   (= alert) -> prev_state
+                                 compact    after CUBE_COMPACT_REVERT s (= alert) -> prev_state
+                                 done       after CUBE_DONE_REVERT s    (5)  -> idle
+                                 start      after CUBE_START_REVERT s   (= done) -> idle
   end                          Evict current session_id (used by SessionEnd).
   redisplay                    Re-push current aggregated state (no mutation).
                                Used by cube-watchdog after device reboot.
@@ -335,7 +371,7 @@ Usage: $0 <command> [arg]
   ping                         Connectivity check (exits 1 on fail).
 
 Hook mapping (mirrors peon-ping):
-  SessionStart              -> idle
+  SessionStart              -> start
   UserPromptSubmit          -> thinking
   Stop                      -> done
   SessionEnd                -> end
@@ -349,10 +385,11 @@ Env: CUBE_IP (required; or .env / ~/.config/cube/config),
      CUBE_SKIN_FILE (default ~/.claude/.cube-skin),
      CUBE_SESSIONS_FILE (default /tmp/.cube-sessions-\$UID.json),
      CUBE_SESSION_TTL (default 3600 seconds — stale-session prune),
-     CUBE_ALERT_REVERT (default 30; 0 = forever),
-     CUBE_PERMISSION_REVERT (default 0 = forever),
+     CUBE_ALERT_REVERT (default 5; 0 = forever),
+     CUBE_PERMISSION_REVERT (default = ALERT_REVERT; 0 = forever),
      CUBE_ERROR_REVERT / CUBE_COMPACT_REVERT (default = ALERT_REVERT),
      CUBE_DONE_REVERT (default 5),
+     CUBE_START_REVERT (default = DONE_REVERT),
      CUBE_RECAP_WINDOW (default 60s; 0 = off — suppresses post-compact done)
 EOF
     ;;

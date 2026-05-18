@@ -129,18 +129,23 @@ def derive_state(img_path):
 
 
 def resolve_local(img_path):
-    """img=/image/waifu_error.gif -> assets/waifu/error.gif (raw PixelLab source).
-       img=/image/alert.gif       -> assets/orb/alert.gif"""
+    """img=/image/waifu_error.gif -> assets/desktop/waifu/error.gif (override, hi-res)
+                                  -> assets/waifu/error.gif (cube source fallback).
+       img=/image/alert.gif       -> assets/desktop/orb/alert.gif (override)
+                                  -> assets/orb/alert.gif (fallback).
+    desktop/ overrides are overlay-only; never uploaded to cube hardware."""
     base = os.path.basename(img_path or "")
     m = re.match(r"^([a-z0-9]+)_(.+\.gif)$", base)
     if m:
         skin, fname = m.group(1), m.group(2)
-        p = os.path.join(ASSETS_DIR, skin, fname)
+        for sub in (os.path.join("desktop", skin), skin):
+            p = os.path.join(ASSETS_DIR, sub, fname)
+            if os.path.isfile(p):
+                return p
+    for sub in (os.path.join("desktop", "orb"), "orb"):
+        p = os.path.join(ASSETS_DIR, sub, base)
         if os.path.isfile(p):
             return p
-    p = os.path.join(ASSETS_DIR, "orb", base)
-    if os.path.isfile(p):
-        return p
     return None
 
 
