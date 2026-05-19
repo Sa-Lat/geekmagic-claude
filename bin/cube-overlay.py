@@ -18,6 +18,7 @@ import argparse
 import io
 import json
 import os
+import subprocess
 import sys
 import tkinter as tk
 import urllib.request
@@ -52,6 +53,29 @@ def format_age(s):
         return f"{s // 60}m"
     h, m = s // 3600, (s % 3600) // 60
     return f"{h}h" if m == 0 else f"{h}h{m}m"
+
+
+def wslg_probe():
+    """Spawn a tiny decorated Tk window in a subprocess for ~120ms. WSLg bug:
+    after a service restart, overrideredirect (frameless) windows occasionally
+    fail to map until any decorated X11 client surfaces. This nudge wakes the
+    compositor. Window is 1x1 offscreen so user never sees it. Harmless on
+    non-WSLg setups (just a brief extra process). Timeout caps at 3s in case
+    Tk hangs."""
+    script = (
+        "import tkinter as tk\n"
+        "r = tk.Tk()\n"
+        "r.title('cube-probe')\n"
+        "r.geometry('1x1+-2000+-2000')\n"
+        "r.update()\n"
+        "r.after(120, r.destroy)\n"
+        "r.mainloop()\n"
+    )
+    try:
+        subprocess.run([sys.executable, "-c", script],
+                       timeout=3, capture_output=True)
+    except Exception:
+        pass
 
 
 def block_text(sess):
@@ -127,6 +151,10 @@ def main():
     args = ap.parse_args()
 
     win_w = args.width if args.width > 0 else max(180, args.size + 2 * PAD)
+
+    # WSLg compositor wake-up before creating the real frameless window.
+    if args.frameless:
+        wslg_probe()
 
     root = tk.Tk()
     root.title("cube-overlay")
