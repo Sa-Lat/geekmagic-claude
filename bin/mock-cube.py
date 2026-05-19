@@ -65,6 +65,36 @@ def _read_displayed_cwd():
     return os.path.basename((d.get("displayed_cwd") or "").rstrip("/"))
 
 
+# Mirrors cube.sh PRIO map. Keep in sync.
+SESSION_PRIO = {"permission": 5, "error": 4, "compact": 3, "done": 2.5,
+                "thinking": 2, "alert": 1, "start": 0.5, "idle": 0}
+SESSION_TTL = int(os.environ.get("CUBE_SESSION_TTL", "3600"))
+
+
+def _read_sessions_list():
+    """Return [{cwd, state, age_s}, ...] sorted by PRIO desc then age asc.
+    Stale entries (TTL exceeded) filtered out. Empty list on any error."""
+    try:
+        with open(SESSIONS_FILE) as f:
+            d = json.load(f)
+    except Exception:
+        return []
+    now = time.time()
+    out = []
+    for entry in (d.get("sessions") or {}).values():
+        ts = entry.get("ts", 0)
+        if now - ts >= SESSION_TTL:
+            continue
+        started = entry.get("started_at", ts)
+        out.append({
+            "cwd": os.path.basename((entry.get("cwd") or "").rstrip("/")),
+            "state": entry.get("state", "idle"),
+            "age_s": int(now - started),
+        })
+    out.sort(key=lambda s: (-SESSION_PRIO.get(s["state"], 0), s["age_s"]))
+    return out
+
+
 def _refresh_usage():
     pct = None
     cmd = _find_ccusage_cmd()
@@ -184,6 +214,7 @@ class H(BaseHTTPRequestHandler):
             payload = dict(STATE)
             payload["cwd"] = _read_displayed_cwd()
             payload["usage_5h_pct"] = _read_usage_pct()
+            payload["sessions"] = _read_sessions_list()
             return self._json(payload)
         if u.path == "/current.gif":
             p = resolve_local(STATE["img"])

@@ -150,7 +150,8 @@ if op == "update":
         seq_out = -1
     else:
         seq_out = prev.get("seq", 0) + 1
-        entry = {"state": new_state, "ts": now, "seq": seq_out}
+        entry = {"state": new_state, "ts": now, "seq": seq_out,
+                 "started_at": prev.get("started_at", now)}
         if new_state == "compact":
             entry["compact_ts"] = now
         elif new_state != "thinking" and "compact_ts" in prev:
