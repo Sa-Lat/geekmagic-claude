@@ -10,7 +10,7 @@ Run:
 Env (defaults if CLI not given):
   CUBE_OVERLAY_MOCK         default http://127.0.0.1:8080
   CUBE_OVERLAY_X / _Y       window position
-  CUBE_OVERLAY_SIZE         gif edge length (default 100)
+  CUBE_OVERLAY_SIZE         gif edge length (0/unset = auto-fit to window width)
   CUBE_OVERLAY_WIDTH        window width    (default = max(180, size+2*pad))
   CUBE_OVERLAY_MAX_BLOCKS   how many session blocks to show (default 5)
 """
@@ -137,8 +137,8 @@ def main():
     ap.add_argument("--mock", default=os.environ.get("CUBE_OVERLAY_MOCK", "http://127.0.0.1:8080"))
     ap.add_argument("--margin", type=int, default=20)
     ap.add_argument("--size", type=int,
-                    default=int(os.environ.get("CUBE_OVERLAY_SIZE", 100)),
-                    help="gif edge length (pixels)")
+                    default=int(os.environ.get("CUBE_OVERLAY_SIZE", 0)),
+                    help="gif edge length (pixels). 0 = auto-fit to window width.")
     ap.add_argument("--width", type=int,
                     default=int(os.environ.get("CUBE_OVERLAY_WIDTH", 0)),
                     help="window width (0 = derive from size + padding)")
@@ -150,7 +150,10 @@ def main():
     ap.add_argument("--frameless", action="store_true", help="overrideredirect borderless")
     args = ap.parse_args()
 
-    win_w = args.width if args.width > 0 else max(180, args.size + 2 * PAD)
+    win_w = args.width if args.width > 0 else max(180, (args.size or 100) + 2 * PAD)
+    # Auto-fit: GIF fills window width minus padding when size wasn't set.
+    if args.size <= 0:
+        args.size = win_w - 2 * PAD
 
     # WSLg compositor wake-up before creating the real frameless window.
     if args.frameless:
