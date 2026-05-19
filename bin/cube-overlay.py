@@ -57,7 +57,8 @@ EMOJI = {
 SKIN_PALETTES = {
     "orb": {
         "dark": {
-            "chrome": {"bg": "#1a120c", "fg_bright": "#e0d4c0", "fg_dim": "#807060"},
+            "chrome": {"bg": "#1a120c", "fg_bright": "#e0d4c0", "fg_dim": "#807060",
+                       "usage_bg": "#2a1e14"},
             "states": {
                 "permission": {"bg": "#4a3a0e", "fg": "#ffd860"},
                 "error":      {"bg": "#4a1a14", "fg": "#ff9080"},
@@ -66,11 +67,12 @@ SKIN_PALETTES = {
                 "thinking":   {"bg": "#1f2a32", "fg": "#9fb8c8"},
                 "done":       {"bg": "#1a3010", "fg": "#a0d090"},
                 "start":      {"bg": "#1f2a32", "fg": "#aac8d8"},
-                "idle":       {"bg": "#15100a", "fg": "#665544"},
+                "idle":       {"bg": "#15100a", "fg": "#a89070"},
             },
         },
         "light": {
-            "chrome": {"bg": "#f0e6d2", "fg_bright": "#2a1810", "fg_dim": "#605040"},
+            "chrome": {"bg": "#f0e6d2", "fg_bright": "#2a1810", "fg_dim": "#605040",
+                       "usage_bg": "#e0d6c0"},
             "states": {
                 "permission": {"bg": "#fae6a8", "fg": "#7a5500"},
                 "error":      {"bg": "#fad0c0", "fg": "#8a2010"},
@@ -85,7 +87,8 @@ SKIN_PALETTES = {
     },
     "waifu": {
         "dark": {
-            "chrome": {"bg": "#1a0d18", "fg_bright": "#f0d8e0", "fg_dim": "#806878"},
+            "chrome": {"bg": "#1a0d18", "fg_bright": "#f0d8e0", "fg_dim": "#806878",
+                       "usage_bg": "#2a1828"},
             "states": {
                 "permission": {"bg": "#4a1f3a", "fg": "#ff9bde"},
                 "error":      {"bg": "#4a1424", "fg": "#ff8a9b"},
@@ -94,11 +97,12 @@ SKIN_PALETTES = {
                 "thinking":   {"bg": "#2a1d3a", "fg": "#c0a8d8"},
                 "done":       {"bg": "#2a3a1f", "fg": "#a8d098"},
                 "start":      {"bg": "#2a1d3a", "fg": "#c8b0e0"},
-                "idle":       {"bg": "#1a0e16", "fg": "#665058"},
+                "idle":       {"bg": "#1a0e16", "fg": "#a890a0"},
             },
         },
         "light": {
-            "chrome": {"bg": "#f7e6ef", "fg_bright": "#2a1020", "fg_dim": "#605060"},
+            "chrome": {"bg": "#f7e6ef", "fg_bright": "#2a1020", "fg_dim": "#605060",
+                       "usage_bg": "#ead8e2"},
             "states": {
                 "permission": {"bg": "#fad0e8", "fg": "#7a1058"},
                 "error":      {"bg": "#fac8d0", "fg": "#8a1825"},
@@ -239,9 +243,16 @@ def load_frames(gif_bytes, size):
     return frames, durations
 
 
-def usage_color(pct):
+def usage_color(pct, theme="dark"):
     if pct is None:
         return FG_DIM
+    if theme == "light":
+        # Darker variants — saturated mid-tones disappear against light bg.
+        if pct >= 80:
+            return "#a51010"
+        if pct >= 50:
+            return "#7a5500"
+        return "#2a6020"
     if pct >= 80:
         return "#e85555"
     if pct >= 50:
@@ -348,8 +359,10 @@ def main():
     blocks_frame.pack(side="top", fill="x", padx=PAD, pady=(PAD, 0))
 
     # Usage line (separator-style)
-    usage_lbl = tk.Label(root, text="", fg=FG_DIM, bg=BG,
-                         font=("TkDefaultFont", font_size), anchor="w")
+    usage_bg = pal["chrome"].get("usage_bg", BG)
+    usage_lbl = tk.Label(root, text="", fg=FG_DIM, bg=usage_bg,
+                         font=("TkDefaultFont", font_size, "bold"),
+                         anchor="w", padx=6, pady=2)
     usage_lbl.pack(side="top", fill="x", padx=PAD, pady=(2, 0))
 
     # GIF (Char) below
@@ -459,7 +472,8 @@ def main():
     def update_dashboard(d):
         render_sessions(d.get("sessions") or [])
         pct = d.get("usage_5h_pct")
-        usage_lbl.configure(text=usage_label(pct), fg=usage_color(pct))
+        usage_lbl.configure(text=usage_label(pct),
+                            fg=usage_color(pct, cur["theme"]))
 
     def poll():
         # No periodic topmost/lift — WSLg interprets that as a focus-grab
@@ -507,9 +521,10 @@ def main():
         BG = pal["chrome"]["bg"]
         FG_DIM = pal["chrome"]["fg_dim"]
         FG_BRIGHT = pal["chrome"]["fg_bright"]
+        usage_bg = pal["chrome"].get("usage_bg", BG)
         root.configure(bg=BG)
         blocks_frame.configure(bg=BG)
-        usage_lbl.configure(bg=BG)
+        usage_lbl.configure(bg=usage_bg)
         gif_lbl.configure(bg=BG)
         cur["skin"] = skin
         cur["theme"] = theme
