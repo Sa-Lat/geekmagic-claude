@@ -13,6 +13,9 @@ Env (defaults if CLI not given):
   CUBE_OVERLAY_SIZE         gif edge length (0/unset = auto-fit to window width)
   CUBE_OVERLAY_WIDTH        window width    (default = max(180, size+2*pad))
   CUBE_OVERLAY_MAX_BLOCKS   how many session blocks to show (default 5)
+  CUBE_OVERLAY_RESET_R / _B Reset-menu landing anchor (default 3838/1030 —
+                            primary-monitor right-bottom in the typical
+                            WSLg dual-monitor layout)
 """
 import argparse
 import io
@@ -425,11 +428,13 @@ def main():
         needed = len(shown) + (1 if overflow else 0)
 
         # Grow widget pool
+        cursor = cur.get("cursor", "")
         while len(widgets) < needed:
-            fr = tk.Frame(blocks_frame, bd=0, highlightthickness=0, bg=BG)
+            fr = tk.Frame(blocks_frame, bd=0, highlightthickness=0, bg=BG,
+                          cursor=cursor)
             lbl = tk.Label(fr, text="", bg=BG, fg=FG_BRIGHT,
                            font=("TkDefaultFont", font_size, "bold"), anchor="w",
-                           padx=6, pady=2)
+                           padx=6, pady=2, cursor=cursor)
             lbl.pack(fill="x")
             fr.pack(fill="x", pady=(0, 2))
             widgets.append((fr, lbl))
@@ -532,8 +537,14 @@ def main():
             pass
 
     def reset_position():
+        # Reset lands at the user's "home" anchor — primary monitor right-bottom
+        # in the typical multi-monitor WSLg layout. Overridable per machine via
+        # CUBE_OVERLAY_RESET_R / _B if the default doesn't fit.
+        reset_r = int(os.environ.get("CUBE_OVERLAY_RESET_R", "3838"))
+        reset_b = int(os.environ.get("CUBE_OVERLAY_RESET_B", "1030"))
         write_overlay_env({
-            "CUBE_OVERLAY_ANCHOR_R": None, "CUBE_OVERLAY_ANCHOR_B": None,
+            "CUBE_OVERLAY_ANCHOR_R": reset_r,
+            "CUBE_OVERLAY_ANCHOR_B": reset_b,
             "CUBE_OVERLAY_X": None, "CUBE_OVERLAY_Y": None,
         })
         restart_overlay()
@@ -550,8 +561,24 @@ def main():
     size_var = tk.IntVar(value=win_w)
     lock_var = tk.BooleanVar(value=os.environ.get("CUBE_OVERLAY_POSITION_LOCKED", "1") == "1")
 
+    def apply_cursor():
+        c = "" if lock_var.get() else "fleur"
+        cur["cursor"] = c
+        for w in (root, blocks_frame, usage_lbl, gif_lbl):
+            try:
+                w.configure(cursor=c)
+            except tk.TclError:
+                pass
+        for fr, lbl in cur["block_widgets"]:
+            try:
+                fr.configure(cursor=c)
+                lbl.configure(cursor=c)
+            except tk.TclError:
+                pass
+
     def toggle_lock():
         write_overlay_env({"CUBE_OVERLAY_POSITION_LOCKED": "1" if lock_var.get() else "0"})
+        apply_cursor()
 
     menu = tk.Menu(root, tearoff=0, bg="#222", fg="#eee",
                    activebackground="#3a3a3a", activeforeground="#fff", bd=0)
@@ -587,6 +614,54 @@ def main():
         finally:
             menu.grab_release()
 
+    # Drag-to-reposition (only when not locked via menu)
+    drag = {"active": False, "off_x": 0, "off_y": 0}
+
+    def drag_start(ev):
+        if lock_var.get():
+            return
+        # bind_all catches Button-1 on menu items too; skip those so clicking
+        # Reset/Size/etc. doesn't engage the drag system + clobber the menu's
+        # write in drag_end.
+        try:
+            if ev.widget.winfo_class() == "Menu":
+                return
+        except Exception:
+            return
+        drag["active"] = True
+        drag["off_x"] = ev.x_root - root.winfo_rootx()
+        drag["off_y"] = ev.y_root - root.winfo_rooty()
+
+    def drag_motion(ev):
+        if not drag["active"]:
+            return
+        new_x = ev.x_root - drag["off_x"]
+        new_y = ev.y_root - drag["off_y"]
+        root.geometry(f"{win_w}x{cur['last_height']}+{new_x}+{new_y}")
+
+    def drag_end(_ev):
+        if not drag["active"]:
+            return
+        drag["active"] = False
+        new_x = root.winfo_rootx()
+        new_y = root.winfo_rooty()
+        # New anchor = current bottom-right corner. Persist + sync in-process
+        # so subsequent height-resizes pivot from the new spot.
+        cur["anchor_right"] = new_x + win_w
+        cur["anchor_bottom"] = new_y + cur["last_height"]
+        try:
+            write_overlay_env({
+                "CUBE_OVERLAY_ANCHOR_R": cur["anchor_right"],
+                "CUBE_OVERLAY_ANCHOR_B": cur["anchor_bottom"],
+            })
+        except Exception:
+            pass
+
+    apply_cursor()
+
+    root.bind_all("<Button-1>", drag_start)
+    root.bind_all("<B1-Motion>", drag_motion)
+    root.bind_all("<ButtonRelease-1>", drag_end)
     root.bind_all("<Button-3>", show_menu)
     root.bind("<Escape>", lambda _e: root.destroy())
 
