@@ -286,8 +286,29 @@ nohup ~/.claude/bin/cube-watchdog.sh > ~/.claude/cube-watchdog.log 2>&1 &
 Wenn der Cube nicht erreichbar ist (Office, unterwegs) oder beim Entwickeln —
 `bin/mock-cube.py` ist ein Stdlib-HTTP-Server der die Cube-Endpoints
 nachbaut, `bin/cube-overlay.py` ein frameless Tk-Window (WSLg-friendly), das
-den Mock pollt und State-GIFs auf den Desktop spiegelt. Zusätzlich ein
-Mini-Dashboard: Projekt-Basename (cwd der gewinnenden Session) + 5h-Token-Usage-%.
+den Mock pollt und Multi-Session-Status auf den Desktop spiegelt. Bleibt
+immer sichtbar (auch idle), Block pro aktiver Claude-Session, plus der
+Char-GIF des Winner-States.
+
+```
+┌──────────────────────────┐
+│ 🔐 navigatoren · 3m      │  permission, gelb
+│ ❌ other-proj · 1h       │  error, rot
+│ ⚙  cube · 12m            │  thinking, blau
+│ 💤 fleet-mgmt            │  idle, gedimmt (alphabetisch, ohne age)
+├──────────────────────────┤
+│ Usage 42%                │  5h-Token-Window (bold, eigene BG)
+├──────────────────────────┤
+│   [waifu/orb GIF]        │  Winner-State, skin-aware
+└──────────────────────────┘
+```
+
+Rechtsklick öffnet Menü: Theme (dark/light), Skin (orb/waifu), Position
+(Lock/Reset), Size (Small/Medium/Large), Hide, Quit. Settings persistieren
+atomic in `~/.config/cube/overlay.env`. Position-Unlock + Drag verschiebt
+das Fenster, neue Anchor wird beim Release gespeichert. Sortierung im
+Mock: nach PRIO desc + age asc für aktive States, idle alphabetisch nach
+cwd am Boden.
 
 Setup:
 
@@ -303,8 +324,18 @@ echo "CUBE_MIRROR=127.0.0.1:8080" >> ~/.config/cube/config
 - `~/.config/cube/config` — `CUBE_IP`, `CUBE_MIRROR` (comma-separated mirrors),
   `CUBE_USAGE_TOKEN_LIMIT` (Token-Cap fürs Overlay-%, sonst nutzt es ccusage's
   historisches Max — Anthropic publiziert keine exakten Max-Plan-Limits)
-- `~/.config/cube/overlay.env` — Overlay-Position pro Maschine:
-  `CUBE_OVERLAY_X`, `CUBE_OVERLAY_Y`, `CUBE_OVERLAY_SIZE`, `CUBE_OVERLAY_WIDTH`
+- `~/.config/cube/overlay.env` — Overlay-Settings pro Maschine, vom Menü
+  geschrieben:
+  - `CUBE_OVERLAY_ANCHOR_R` / `_B` — Bottom-Right-Anchor (bleibt fix bei
+    Size-Wechsel; Fenster wächst nach oben/links davon)
+  - `CUBE_OVERLAY_RESET_R` / `_B` — Reset-Menü Landing-Anchor (default
+    3838/1030 = Mitte-Monitor rechts-unten im typischen WSLg-Dual-Monitor)
+  - `CUBE_OVERLAY_WIDTH` — 140/180/240 für Small/Medium/Large (Font + GIF
+    skalieren mit)
+  - `CUBE_OVERLAY_SIZE` — GIF-Edge, 0/unset = auto-fit zur Width
+  - `CUBE_OVERLAY_THEME` — `dark` (default) oder `light`
+  - `CUBE_OVERLAY_POSITION_LOCKED` — `1` Locked (default), `0` für Drag
+  - `CUBE_OVERLAY_MAX_BLOCKS` — wie viele Session-Blöcke sichtbar (default 5)
 
 Hi-res Overlay-Assets (optional): `assets/desktop/<skin>/<state>.gif` —
 mock-cube serviert diese bevorzugt vor `assets/<skin>/`, sodass das Overlay
