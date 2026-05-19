@@ -91,8 +91,14 @@ def _read_sessions_list():
             "state": entry.get("state", "idle"),
             "age_s": int(now - started),
         })
-    out.sort(key=lambda s: (-SESSION_PRIO.get(s["state"], 0), s["age_s"]))
-    return out
+    # Split idle from active: active sorted by PRIO desc + age asc (freshness
+    # cue); idle sorted alphabetically by cwd (no second-by-second reshuffle).
+    # Idle always lands at the bottom of the list.
+    idle = [s for s in out if s["state"] == "idle"]
+    active = [s for s in out if s["state"] != "idle"]
+    active.sort(key=lambda s: (-SESSION_PRIO.get(s["state"], 0), s["age_s"]))
+    idle.sort(key=lambda s: s["cwd"].lower())
+    return active + idle
 
 
 def _refresh_usage():
