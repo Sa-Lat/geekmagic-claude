@@ -5,17 +5,20 @@ Verwandelt einen [GeekMagic SmallTV-Ultra](https://github.com/GeekMagicClock/sma
 
 | Claude-Hook | Cube zeigt | Auto-Revert | peon-ping Kategorie |
 |---|---|---|---|
-| `SessionStart` | `idle.gif` | — | `session.start` |
+| `SessionStart` | `done.gif` (visueller Alias, eigener State-Label fürs Routing) | 5 s → idle | `session.start` |
 | `UserPromptSubmit` (Prompt rein, denkt) | `thinking.gif` | — | `task.acknowledge` |
 | `Stop` (Antwort fertig) | `done.gif` | 5 s → idle | `task.complete` |
-| `Notification` | `alert.gif` | 30 s → idle | (varies) |
-| `PermissionRequest` | `permission.gif` (waifu) / `alert.gif` (orb) | 0 (forever, bis User handelt) | `input.required` |
-| `PostToolUseFailure` (Bash) | `error.gif` (waifu) / `alert.gif` (orb) | 30 s → idle | `task.error` |
-| `PreCompact` (Kontext voll) | `compact.gif` (waifu) / `alert.gif` (orb) | 30 s → idle | `resource.limit` |
+| `Notification` | `alert.gif` | 5 s → prev_state | (varies) |
+| `PermissionRequest` | `permission.gif` (waifu) / `alert.gif` (orb) | 5 s → prev_state | `input.required` |
+| `PostToolUseFailure` (Bash) | `error.gif` (waifu) / `alert.gif` (orb) | 5 s → prev_state | `task.error` |
+| `PreCompact` (Kontext voll) | `compact.gif` (waifu) / `alert.gif` (orb) | 5 s → prev_state | `resource.limit` |
 | `SessionEnd` | (Session-Eviction) | — | (cleanup) |
 
-Permission revert ist absichtlich 0 — Claude ist bis zur User-Reaktion blockiert,
-ein Auto-Revert auf `idle` wäre irreführend. Hooks-Set spiegelt 1:1 das von
+`prev_state` = letzter stabiler State der Session (`thinking` oder `idle`),
+sodass ein Bash-Fail während `thinking` zurück auf `thinking` revertet, nicht
+auf `idle`. `done`/`start` revertieren immer auf `idle` (Task-Ende /
+Session-Greeting). Wer `permission` lieber forever bis User-Reaktion will:
+`CUBE_PERMISSION_REVERT=0`. Hooks-Set spiegelt 1:1 das von
 [peon-ping](https://github.com/) (Audio-Sibling), so dass Cube und Sound im
 Gleichschritt feuern.
 
@@ -56,7 +59,7 @@ weiter (2s curl-Timeout + `exit 0`).
 **Multi-Session-aware:** Cube.sh liest `session_id` aus dem Hook-Stdin-JSON
 (via `jq`) und tracked Zustand **pro Session** in `/tmp/.cube-sessions-$UID.json`.
 Bei mehreren parallelen Claude-Sessions wird der Display-Zustand per Priorität
-aggregiert: `permission > error > compact > thinking > alert > idle`. Beispiel:
+aggregiert: `permission > error > compact > done > thinking > alert > start > idle`. Beispiel:
 Session A denkt, Session B beendet — Cube bleibt auf `thinking`. Session A
 beendet → Cube auf `idle`. Stale Sessions (>1 h kein Update) werden geprunet.
 Auto-Revert ist TOCTOU-sicher via Per-Session Seq-Counter.
@@ -76,7 +79,7 @@ Auto-Revert ist TOCTOU-sicher via Per-Session Seq-Counter.
 ```
 cube/
 ├── README.md             ← du bist hier
-├── Makefile              ← Top-Level Targets (resize, upload, deploy, cycle)
+├── Makefile              ← Top-Level Targets (resize, upload, deploy, cycle, dev-install)
 ├── bin/
 │   ├── cube.sh           ← Haupt-CLI (wird nach ~/.claude/bin/ deployed)
 │   ├── cube-gen.py       ← Pillow-Placeholder-Generator (optional)
@@ -85,12 +88,18 @@ cube/
 │   ├── contrast-fix.py   ← Pillow Sat/Con/Sharp pro Frame (Brauen-Rescue)
 │   ├── cube-watchdog.sh  ← Polling-Daemon, redisplay nach Cube-Reboot
 │   ├── cube-watchdog.service ← systemd --user Unit (optional)
-│   ├── deploy.sh         ← Sync bin/cube.sh* → ~/.claude/bin/
+│   ├── mock-cube.py      ← Stdlib HTTP-Server, mimics cube für Dev ohne Hardware
+│   ├── mock-cube.service ← systemd --user Unit für mock-cube
+│   ├── cube-overlay.py   ← Frameless Tk-Window (WSLg), spiegelt mock-cube auf Desktop
+│   ├── cube-overlay.service ← systemd --user Unit für overlay
+│   ├── deploy.sh         ← Sync bin/* → ~/.claude/bin/ + systemd-Units
 │   ├── cycle.sh          ← Visueller Smoke-Test
 │   └── clear-old.sh      ← Räumt Cube auf (Dry-run + --force)
 ├── assets/
 │   ├── orb/              ← orb-skin source GIFs (thinking/alert/idle/done)
-│   ├── waifu/            ← waifu-skin source GIFs (alle 7 states)
+│   ├── waifu/            ← waifu-skin source GIFs (alle 7 states; `start` ist visueller Alias auf done.gif)
+│   ├── desktop/          ← optionale hi-res Overrides nur für Overlay
+│   │   └── <skin>/       ← 256×256, 7-16 Frames, kein Quantize-Limit (cube-pipeline skippt diesen Dir)
 │   └── 240/
 │       ├── orb/          ← orb 240×240 hochskaliert
 │       └── waifu/        ← waifu 240×240 hochskaliert
@@ -149,10 +158,12 @@ make cycle            # visueller Test
 ```bash
 bin/cube.sh thinking         # state-gif, gleich für orb/waifu (über skin)
 bin/cube.sh redisplay        # re-push aggregierten state (kein session-mutate)
-bin/cube.sh alert            # auto-revert nach CUBE_ALERT_REVERT s (default 30)
-bin/cube.sh permission       # auto-revert CUBE_PERMISSION_REVERT s (default 0 = forever)
-bin/cube.sh error            # PostToolUseFailure-Variante, revert via CUBE_ERROR_REVERT
-bin/cube.sh compact          # PreCompact-Variante, revert via CUBE_COMPACT_REVERT
+bin/cube.sh start            # SessionStart-Variante, revert nach CUBE_START_REVERT s (default 5 → idle)
+bin/cube.sh done             # Stop-Variante, revert nach CUBE_DONE_REVERT s (default 5 → idle)
+bin/cube.sh alert            # auto-revert nach CUBE_ALERT_REVERT s (default 5 → prev_state)
+bin/cube.sh permission       # auto-revert CUBE_PERMISSION_REVERT s (default 5 → prev_state; =0 für forever)
+bin/cube.sh error            # PostToolUseFailure-Variante, revert via CUBE_ERROR_REVERT (default 5 → prev_state)
+bin/cube.sh compact          # PreCompact-Variante, revert via CUBE_COMPACT_REVERT (default 5 → prev_state)
 bin/cube.sh idle
 bin/cube.sh end              # Session aus Map evicten (für SessionEnd-Hook)
 bin/cube.sh skin             # show current skin
@@ -167,13 +178,18 @@ bin/cube.sh ping             # Connectivity-Check (exit 1 on fail)
 
 **Env-Tweaks:**
 ```bash
-CUBE_ALERT_REVERT=60 cube.sh alert      # länger (default 30 s)
+CUBE_ALERT_REVERT=60 cube.sh alert      # länger (default 5 s)
 CUBE_ALERT_REVERT=0 cube.sh alert       # disabled (alert bleibt forever)
-CUBE_PERMISSION_REVERT=60 cube.sh permission   # default 0 = forever
+CUBE_PERMISSION_REVERT=0 cube.sh permission   # forever (default 5 s → prev_state)
 CUBE_ERROR_REVERT=10 cube.sh error      # default = CUBE_ALERT_REVERT
+CUBE_COMPACT_REVERT=10 cube.sh compact  # default = CUBE_ALERT_REVERT
+CUBE_DONE_REVERT=10 cube.sh done        # default 5 s → idle
+CUBE_START_REVERT=10 cube.sh start      # default = CUBE_DONE_REVERT
 CUBE_SESSION_TTL=600 cube.sh ...        # stale-prune nach 10 min (default 3600)
 CUBE_SESSIONS_FILE=/tmp/foo.json …      # alternativer State-Store (für Tests)
 CUBE_SKIN=orb cube.sh thinking          # einmaliger skin-override
+CUBE_MIRROR=127.0.0.1:8080 cube.sh ...  # fan-out an Mock-Cube (Dev-Mode, comma-separated)
+CUBE_USAGE_TOKEN_LIMIT=155000000        # 5h-Token-Limit für Overlay-% (Max-Plan empirisch ~155M)
 ```
 
 `cube.sh info` zeigt alle live Sessions mit State, Seq und Age + den
@@ -182,8 +198,6 @@ aggregierten Display-Winner.
 Oder in Claude Code via Slash-Command: `/cube thinking|alert|idle|...`
 
 ## Cube HTTP-API Cheat-Sheet
-
-Vollständige Liste auch im [Plan](~/.claude/plans/rustling-sniffing-planet.md).
 
 | Endpoint | Zweck |
 |---|---|
@@ -207,7 +221,7 @@ In `~/.claude/settings.json` sind unter `hooks` folgende Einträge **additiv** e
 
 ```json
 "SessionStart":      [ ..., {"matcher": "", "hooks": [
-  {"type": "command", "command": "~/.claude/bin/cube.sh idle",
+  {"type": "command", "command": "~/.claude/bin/cube.sh start",
    "timeout": 3, "async": true}]}],
 "SessionEnd":        [ ..., {"matcher": "", "hooks": [
   {"type": "command", "command": "~/.claude/bin/cube.sh end",
@@ -216,7 +230,7 @@ In `~/.claude/settings.json` sind unter `hooks` folgende Einträge **additiv** e
   {"type": "command", "command": "~/.claude/bin/cube.sh thinking",
    "timeout": 3, "async": true}]}],
 "Stop":              [ ..., {"matcher": "", "hooks": [
-  {"type": "command", "command": "~/.claude/bin/cube.sh idle",
+  {"type": "command", "command": "~/.claude/bin/cube.sh done",
    "timeout": 3, "async": true}]}],
 "Notification":      [ ..., {"matcher": "", "hooks": [
   {"type": "command", "command": "~/.claude/bin/cube.sh alert",
@@ -244,7 +258,7 @@ offline → online Transition `cube.sh redisplay` raus — das re-aggregiert den
 aktuellen Session-State (oder `idle` wenn keine Sessions live).
 
 ```bash
-make deploy   # legt cube-watchdog.sh nach ~/.claude/bin/
+make deploy   # legt cube-watchdog.sh nach ~/.claude/bin/ (plus alle anderen Scripts + systemd-Units)
 ```
 
 Als systemd --user Service (empfohlen):
@@ -268,6 +282,38 @@ nohup ~/.claude/bin/cube-watchdog.sh > ~/.claude/cube-watchdog.log 2>&1 &
 - `CUBE_WATCHDOG_INTERVAL=30` — Poll-Intervall (default 15 s)
 - `CUBE_WATCHDOG_PING_TIMEOUT=5` — curl-Timeout pro Probe (default 3 s)
 
+## Dev-Mode (ohne Hardware)
+
+Wenn der Cube nicht erreichbar ist (Office, unterwegs) oder beim Entwickeln —
+`bin/mock-cube.py` ist ein Stdlib-HTTP-Server der die Cube-Endpoints
+nachbaut, `bin/cube-overlay.py` ein frameless Tk-Window (WSLg-friendly), das
+den Mock pollt und State-GIFs auf den Desktop spiegelt. Zusätzlich ein
+Mini-Dashboard: Projekt-Basename (cwd der gewinnenden Session) + 5h-Token-Usage-%.
+
+Setup:
+
+```bash
+make deploy        # installiert mock-cube.py, cube-overlay.py + systemd-Units
+make dev-install   # aktiviert mock-cube + cube-overlay als systemd --user Service
+
+# fan-out cube.sh an den Mock einschalten:
+echo "CUBE_MIRROR=127.0.0.1:8080" >> ~/.config/cube/config
+```
+
+**Konfig**:
+- `~/.config/cube/config` — `CUBE_IP`, `CUBE_MIRROR` (comma-separated mirrors),
+  `CUBE_USAGE_TOKEN_LIMIT` (Token-Cap fürs Overlay-%, sonst nutzt es ccusage's
+  historisches Max — Anthropic publiziert keine exakten Max-Plan-Limits)
+- `~/.config/cube/overlay.env` — Overlay-Position pro Maschine:
+  `CUBE_OVERLAY_X`, `CUBE_OVERLAY_Y`, `CUBE_OVERLAY_SIZE`, `CUBE_OVERLAY_WIDTH`
+
+Hi-res Overlay-Assets (optional): `assets/desktop/<skin>/<state>.gif` —
+mock-cube serviert diese bevorzugt vor `assets/<skin>/`, sodass das Overlay
+glattere Animationen rendert als der quantize-limitierte Cube. `resize.sh` und
+`upload.sh` überspringen den `desktop/`-Dir per Name, diese Files landen nie
+auf der Cube. Partielle Coverage ist OK — fehlende States fallen auf die
+Cube-Quelle zurück.
+
 ## Requirements
 
 - `bash`, `curl` — überall da
@@ -277,6 +323,8 @@ nohup ~/.claude/bin/cube-watchdog.sh > ~/.claude/cube-watchdog.log 2>&1 &
 - `gifsicle` — für Resize 128/256 → 240 (`sudo apt install gifsicle`)
 - `python3-pil` — für `bin/contrast-fix.py` (Sat/Con/Sharp Rescue für mono-Palette skins). `sudo apt install python3-pil`
 - `python3-requests` — optional, nur für `cube-gen.py` (Placeholder-Generator)
+- `python3-tk` + `python3-pil.imagetk` — optional, nur Dev-Mode (`cube-overlay.py`). `sudo apt install python3-tk python3-pil.imagetk`
+- `node` + `npx` — optional, nur Dev-Mode (Overlay 5h-Usage-Zeile via `ccusage`). Ohne → Overlay zeigt `Usage —`
 - Claude Code mit Hooks-Support
 
 ## Tweaks (Cube selbst)
