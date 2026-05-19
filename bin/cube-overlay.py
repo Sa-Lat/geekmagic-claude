@@ -57,8 +57,8 @@ EMOJI = {
 SKIN_PALETTES = {
     "orb": {
         "dark": {
-            "chrome": {"bg": "#1a120c", "fg_bright": "#e0d4c0", "fg_dim": "#807060",
-                       "usage_bg": "#2a1e14"},
+            "chrome": {"bg": "#33241a", "fg_bright": "#e0d4c0", "fg_dim": "#807060",
+                       "usage_bg": "#433022"},
             "states": {
                 "permission": {"bg": "#4a3a0e", "fg": "#ffd860"},
                 "error":      {"bg": "#4a1a14", "fg": "#ff9080"},
@@ -67,7 +67,7 @@ SKIN_PALETTES = {
                 "thinking":   {"bg": "#1f2a32", "fg": "#9fb8c8"},
                 "done":       {"bg": "#1a3010", "fg": "#a0d090"},
                 "start":      {"bg": "#1f2a32", "fg": "#aac8d8"},
-                "idle":       {"bg": "#15100a", "fg": "#a89070"},
+                "idle":       {"bg": "#2a1d14", "fg": "#a89070"},
             },
         },
         "light": {
@@ -87,8 +87,8 @@ SKIN_PALETTES = {
     },
     "waifu": {
         "dark": {
-            "chrome": {"bg": "#1a0d18", "fg_bright": "#f0d8e0", "fg_dim": "#806878",
-                       "usage_bg": "#2a1828"},
+            "chrome": {"bg": "#332034", "fg_bright": "#f0d8e0", "fg_dim": "#806878",
+                       "usage_bg": "#432b44"},
             "states": {
                 "permission": {"bg": "#4a1f3a", "fg": "#ff9bde"},
                 "error":      {"bg": "#4a1424", "fg": "#ff8a9b"},
@@ -97,7 +97,7 @@ SKIN_PALETTES = {
                 "thinking":   {"bg": "#2a1d3a", "fg": "#c0a8d8"},
                 "done":       {"bg": "#2a3a1f", "fg": "#a8d098"},
                 "start":      {"bg": "#2a1d3a", "fg": "#c8b0e0"},
-                "idle":       {"bg": "#1a0e16", "fg": "#a890a0"},
+                "idle":       {"bg": "#2a1a2c", "fg": "#a890a0"},
             },
         },
         "light": {
@@ -367,7 +367,7 @@ def main():
 
     # GIF (Char) below
     gif_lbl = tk.Label(root, bd=0, highlightthickness=0, bg=BG)
-    gif_lbl.pack(side="bottom", pady=(0, PAD))
+    gif_lbl.pack(side="bottom", pady=(3, PAD))
 
     cur = {"img": None, "ts": 0, "frames": [], "durs": [], "idx": 0,
            "visible": True, "anim_job": None,
@@ -514,6 +514,18 @@ def main():
         cur["hide_winner"] = cur["last_winner"]
         hide()
 
+    def menu_kwargs():
+        """Chrome-derived kwargs for tk.Menu — keeps right-click menu visually
+        consistent with the overlay's skin/theme instead of the system default."""
+        pal = palette_for(cur["skin"], cur["theme"])
+        return dict(
+            bg=pal["chrome"]["bg"],
+            fg=pal["chrome"]["fg_bright"],
+            activebackground=pal["states"]["thinking"]["bg"],
+            activeforeground=pal["states"]["thinking"]["fg"],
+            bd=0,
+        )
+
     def apply_palette(skin, theme):
         """Update chrome + state-block colors to the (skin, theme) palette."""
         global BG, FG_DIM, FG_BRIGHT
@@ -530,6 +542,12 @@ def main():
         cur["theme"] = theme
         # Force re-render so block bgs/fgs + overflow row pick up new palette.
         cur["block_sig"] = None
+        # Re-theme menus (created later; cur["menus"] absent on initial run).
+        for m in cur.get("menus") or ():
+            try:
+                m.configure(**menu_kwargs())
+            except tk.TclError:
+                pass
 
     def set_theme(name):
         apply_palette(cur["skin"], name)
@@ -595,23 +613,23 @@ def main():
         write_overlay_env({"CUBE_OVERLAY_POSITION_LOCKED": "1" if lock_var.get() else "0"})
         apply_cursor()
 
-    menu = tk.Menu(root, tearoff=0, bg="#222", fg="#eee",
-                   activebackground="#3a3a3a", activeforeground="#fff", bd=0)
-    theme_m = tk.Menu(menu, tearoff=0)
+    mk = menu_kwargs()
+    menu = tk.Menu(root, tearoff=0, **mk)
+    theme_m = tk.Menu(menu, tearoff=0, **mk)
     for t in ("dark", "light"):
         theme_m.add_radiobutton(label=t.capitalize(), variable=theme_var,
                                 value=t, command=lambda n=t: set_theme(n))
     menu.add_cascade(label="Theme", menu=theme_m)
-    skin_m = tk.Menu(menu, tearoff=0)
+    skin_m = tk.Menu(menu, tearoff=0, **mk)
     for sk in SKIN_CHOICES:
         skin_m.add_radiobutton(label=sk, variable=skin_var, value=sk,
                                command=lambda n=sk: set_skin(n))
     menu.add_cascade(label="Skin", menu=skin_m)
-    pos_m = tk.Menu(menu, tearoff=0)
+    pos_m = tk.Menu(menu, tearoff=0, **mk)
     pos_m.add_checkbutton(label="Locked", variable=lock_var, command=toggle_lock)
     pos_m.add_command(label="Reset", command=reset_position)
     menu.add_cascade(label="Position", menu=pos_m)
-    size_m = tk.Menu(menu, tearoff=0)
+    size_m = tk.Menu(menu, tearoff=0, **mk)
     for label, w in SIZE_PRESETS:
         size_m.add_radiobutton(label=f"{label} ({w}px)", variable=size_var,
                                value=w, command=lambda x=w: set_size(x))
@@ -619,6 +637,7 @@ def main():
     menu.add_separator()
     menu.add_command(label="Hide", command=user_hide)
     menu.add_command(label="Quit", command=root.destroy)
+    cur["menus"] = (menu, theme_m, skin_m, pos_m, size_m)
 
     def show_menu(ev):
         # Anchor the menu at the overlay's left edge so it grows rightward
