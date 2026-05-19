@@ -85,11 +85,12 @@ def _read_sessions_list():
         ts = entry.get("ts", 0)
         if now - ts >= SESSION_TTL:
             continue
-        started = entry.get("started_at", ts)
+        # age = time since last state change (ts is bumped on every mutate).
+        # Not session-start; that's not actionable info for the user.
         out.append({
             "cwd": os.path.basename((entry.get("cwd") or "").rstrip("/")),
             "state": entry.get("state", "idle"),
-            "age_s": int(now - started),
+            "age_s": int(now - ts),
         })
     # Split idle from active: active sorted by PRIO desc + age asc (freshness
     # cue); idle sorted alphabetically by cwd (no second-by-second reshuffle).

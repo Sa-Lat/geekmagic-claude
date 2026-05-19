@@ -109,8 +109,7 @@ cube/
     ├── 02-alert.md       ← (orb)
     ├── 03-idle.md        ← (orb)
     ├── 04-workflow.md    ← End-to-End Frames → GIF → Cube
-    ├── waifu-skin.md     ← Magical-Girl-Pink skin: alle 7 states
-    └── yuri-skin.md      ← Yuri-Style skin (geplant, noch keine Assets)
+    └── waifu-skin.md     ← Magical-Girl-Pink skin: alle 7 states
 ```
 
 ## Setup
@@ -348,6 +347,31 @@ Cube-Quelle zurück.
 | "Auto Switch Themes" überschreibt Hook-Bilder | http://$CUBE_IP/ → Auto-Switch deaktivieren |
 | Upload-curl bricht mit "duplicate Content-Length" ab | Cube-FW-Bug, Upload klappt trotzdem — `-f` flag bei curl entfernt sich beschwert nicht |
 | Cube hängt nach großer GIF | Datei <50KB, max 8 Frames |
+| Overlay verschwindet hinter IDE/Browser unter WSLg | Bekannte WSLg-Limitierung — siehe unten. Klick aufs Overlay (oder Rechtsklick-Menü) holt es zurück |
+| Overlay nach Reboot unsichtbar | WSLg overrideredirect-Quirk; cube-overlay.py macht beim Start einen Probe-Window-Trick. Falls trotzdem unsichtbar: `systemctl --user restart cube-overlay.service` |
+
+### WSLg Overlay-Trade-off
+
+Unter WSLg (WSL2 + WSLg-Compositor) wird jedes Linux-X11-Fenster über RDP als
+eigenes Win32-Fenster gerendert. Die Tk-Hints für „bleib oben aber stiehl keinen
+Fokus" gehen bei der Übersetzung verloren:
+
+- `wm_attributes("-topmost", True)` wird zu Win32 `HWND_TOPMOST` — hält oben,
+  klaut aber Fokus.
+- `focusmodel("passive")`, `<Visibility>`-Events bleiben Linux-seitig, kommen
+  nicht beim Windows-WM an.
+
+Cube-Overlay setzt daher topmost nur einmal beim Start + bindet `<Visibility>`
+für best-effort Re-Lift. Trade-off: kein Fokus-Diebstahl beim Tippen, dafür
+kann eine IDE/Browser sich darüber legen wenn sie in den Vordergrund kommt.
+Klick aufs Overlay (oder via `systemctl --user restart cube-overlay`) holt es
+zurück. Native X11 (kein WSLg) hat den Trade-off nicht.
+
+Workarounds wenn unverzichtbar:
+- AutoHotkey-Skript auf Windows-Seite das das Overlay-Window-Class als
+  topmost-ohne-focus-grab markiert (einmalige Einrichtung, ewig stabil)
+- Web-Overlay (HTML-Page die `localhost:8080/dashboard.json` pollt) statt Tk —
+  läuft im Windows-Browser, WSLg-immun, aber größeres Refactor
 
 ## Quellen / Inspiration
 
