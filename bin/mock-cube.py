@@ -165,6 +165,31 @@ def derive_state(img_path):
     return "alert"  # unknown filename → treat as non-idle so overlay still shows it
 
 
+def _proxy_set_skin(skin):
+    cube = os.path.expanduser("~/.claude/bin/cube.sh")
+    if not os.path.isfile(cube):
+        return
+    try:
+        subprocess.run([cube, "skin", skin], timeout=5, capture_output=True)
+        subprocess.run([cube, "redisplay"], timeout=5, capture_output=True)
+    except Exception as e:
+        sys.stderr.write(f"set?skin proxy failed: {e}\n")
+
+
+def derive_skin(img_path):
+    """img=/image/waifu_thinking.gif -> 'waifu'.  img=/image/alert.gif -> 'orb'.
+    Orb uses unprefixed filenames (legacy convention); any other prefix is the
+    skin name. Exposed in /dashboard.json so the Windows overlay can pick the
+    right palette without reading ~/.claude/.cube-skin off the WSL filesystem."""
+    base = os.path.basename(img_path or "")
+    name = base.rsplit(".", 1)[0]
+    if "_" in name:
+        prefix, suffix = name.split("_", 1)
+        if suffix in KNOWN_STATES:
+            return prefix
+    return "orb"
+
+
 def resolve_local(img_path):
     """img=/image/waifu_error.gif -> assets/desktop/waifu/error.gif (override, hi-res)
                                   -> assets/waifu/error.gif (cube source fallback).
@@ -214,11 +239,20 @@ class H(BaseHTTPRequestHandler):
                 STATE["theme"] = int(q["theme"][0])
             if "brt" in q:
                 STATE["brt"] = int(q["brt"][0])
+            if "skin" in q:
+                # Route skin-change through cube.sh in a daemon thread so the
+                # HTTP response returns immediately. cube.sh skin writes
+                # ~/.claude/.cube-skin (WSL source of truth) and cube.sh
+                # redisplay mirrors the new GIF back via CUBE_MIRROR —
+                # STATE.img updates on its own once the redisplay-push lands.
+                threading.Thread(target=_proxy_set_skin,
+                                 args=(q["skin"][0],), daemon=True).start()
             return self._send("OK")
         if u.path == "/state.json":
             return self._json(STATE)
         if u.path == "/dashboard.json":
             payload = dict(STATE)
+            payload["skin"] = derive_skin(STATE["img"])
             payload["cwd"] = _read_displayed_cwd()
             payload["usage_5h_pct"] = _read_usage_pct()
             payload["sessions"] = _read_sessions_list()
@@ -265,8 +299,11 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8080)
+    # Default bind: env override (set in ~/.config/cube/config for systemd unit)
+    # then 127.0.0.1. Use 0.0.0.0 to expose to Windows-host (WSL-IP route) for
+    # bin/win/cube-overlay-win.pyw.
+    ap.add_argument("--host", default=os.environ.get("CUBE_MOCK_HOST", "127.0.0.1"))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("CUBE_MOCK_PORT", "8080")))
     ap.add_argument(
         "--assets",
         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets"),

@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
-"""cube-overlay — frameless always-on-top Tk dashboard that mirrors mock-cube
-state. Renders one block per active Claude session (emoji + cwd + age) sorted
-by state priority, plus 5h-window usage % and the winning state's GIF.
+r"""cube-overlay-win — Windows-native variant of bin/cube-overlay.py.
 
-Run:
-  python3 bin/cube-overlay.py --frameless
-  CUBE_OVERLAY_X=3700 CUBE_OVERLAY_Y=920 python3 bin/cube-overlay.py --frameless
+Runs on Windows-host (CPython + Tk + Pillow) and polls mock-cube inside WSL via
+the WSL-distro IP (resolved at startup with `wsl.exe hostname -I`). Avoids
+WSLg's overrideredirect/topmost/focus-steal pain and the localhost-forwarding
+race with Docker port binds — traffic goes WSL-IP-direct, never via 127.0.0.1.
 
-Env (defaults if CLI not given):
-  CUBE_OVERLAY_MOCK         default http://127.0.0.1:8080
-  CUBE_OVERLAY_X / _Y       legacy window position (migrated once)
-  CUBE_OVERLAY_SIZE         gif edge length (0/unset = auto-fit to window width)
-  CUBE_OVERLAY_WIDTH        window width    (default = max(180, size+2*pad))
-  CUBE_OVERLAY_MAX_BLOCKS   how many session blocks to show (default 5)
-  CUBE_OVERLAY_RESET_R / _B deprecated Reset override; default now =
-                            current layout's primary-monitor right-bottom.
-                            Per-layout anchors live in
-                            ~/.config/cube/overlay-layouts.json.
+Setup (one-time):
+  1. Install Python 3.11+ for Windows (Microsoft Store or python.org).
+  2. py -m pip install --user Pillow
+  3. In WSL: set CUBE_MOCK_HOST=0.0.0.0 in ~/.config/cube/config, restart
+     mock-cube  (`systemctl --user restart mock-cube.service`).
+  4. Double-click bin/win/cube-overlay-win.pyw or run `py cube-overlay-win.pyw`
+     from Windows-side cmd/PowerShell.
+
+Per-machine config lives under %APPDATA%\cube\ (mirrors the WSL ~/.config/cube/
+layout: overlay.env + overlay-layouts.json).
+
+POC scope (see plan): read-only against mock-cube. Skin selection is server-
+driven (whatever cube.sh in WSL has set); Theme/Position/Size still
+local-mutable from the right-click menu. Skin changes are routed via
+`/set?skin=NAME` on mock-cube, which proxies to `cube.sh skin NAME` +
+`cube.sh redisplay` in WSL so the WSL source of truth (`~/.claude/.cube-skin`)
+stays authoritative.
 """
 import argparse
+import ctypes
 import io
 import json
 import os
@@ -26,32 +33,44 @@ import subprocess
 import sys
 import tkinter as tk
 import urllib.request
+from ctypes import wintypes
+
 from PIL import Image, ImageSequence, ImageTk
 
 POLL_MS = 500
 PAD = 6
 
+# Windows scaling: opt into per-monitor DPI awareness so Tk doesn't get
+# bitmap-scaled (blurry) on >100% scaling. SetProcessDpiAwareness(2) =
+# PROCESS_PER_MONITOR_DPI_AWARE. Falls back to SetProcessDPIAware on older
+# Windows.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except (AttributeError, OSError):
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
 
 def size_metrics(win_w):
-    """Map window width to font size and matching block/usage heights so
-    Small windows get smaller fonts and Large windows get bigger fonts."""
     if win_w < 160:
         return {"font": 8, "block_h": 18, "usage_h": 15}
     if win_w < 220:
         return {"font": 9, "block_h": 22, "usage_h": 18}
     return {"font": 11, "block_h": 28, "usage_h": 22}
 
-OVERLAY_ENV_PATH = os.path.expanduser("~/.config/cube/overlay.env")
-LAYOUTS_PATH = os.path.expanduser("~/.config/cube/overlay-layouts.json")
-SKIN_FILE = os.path.expanduser("~/.claude/.cube-skin")
-SERVICE_NAME = "cube-overlay.service"
-SKIN_CHOICES = ("orb", "waifu")
-SIZE_PRESETS = (("Small", 140), ("Medium", 180), ("Large", 240))
 
-# Per-skin × theme palettes. Each block tint is hand-picked to read against
-# the skin's GIF palette so the overlay reads as a single visual surface,
-# not chrome stuck onto a sprite. Chrome (window bg, usage line, overflow
-# row) follows the skin too, not a universal black/white.
+CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "cube")
+OVERLAY_ENV_PATH = os.path.join(CONFIG_DIR, "overlay.env")
+LAYOUTS_PATH = os.path.join(CONFIG_DIR, "overlay-layouts.json")
+WSL_IP_CACHE = {"ip": None, "ts": 0.0}
+SIZE_PRESETS = (("Small", 140), ("Medium", 180), ("Large", 240))
+SKIN_CHOICES = ("orb", "waifu")
+THEME_NAMES = ("dark", "light")
+
+# Palettes mirror bin/cube-overlay.py:54-120. Kept verbatim — when adding a
+# new skin or theme, update both files in lockstep.
 EMOJI = {
     "permission": "🔐", "error": "❌", "compact": "📦", "alert": "⚠",
     "thinking":   "⚙",  "done":  "✅", "start":   "👋", "idle":  "💤",
@@ -118,7 +137,6 @@ SKIN_PALETTES = {
         },
     },
 }
-THEME_NAMES = ("dark", "light")
 
 
 def palette_for(skin, theme):
@@ -126,7 +144,6 @@ def palette_for(skin, theme):
            SKIN_PALETTES.get(skin, SKIN_PALETTES["orb"])["dark"])
 
 
-# Module-level chrome colors initialized to orb/dark; overwritten by main().
 BG = SKIN_PALETTES["orb"]["dark"]["chrome"]["bg"]
 FG_DIM = SKIN_PALETTES["orb"]["dark"]["chrome"]["fg_dim"]
 FG_BRIGHT = SKIN_PALETTES["orb"]["dark"]["chrome"]["fg_bright"]
@@ -143,7 +160,6 @@ def format_age(s):
 
 
 def read_overlay_env():
-    """Parse overlay.env into dict. Empty dict if file missing or unreadable."""
     d = {}
     try:
         with open(OVERLAY_ENV_PATH) as f:
@@ -159,14 +175,13 @@ def read_overlay_env():
 
 
 def write_overlay_env(updates):
-    """Atomic merge-write of overlay.env. updates: {KEY: value-or-None-to-delete}."""
     cur = read_overlay_env()
     for k, v in updates.items():
         if v is None:
             cur.pop(k, None)
         else:
             cur[k] = str(v)
-    os.makedirs(os.path.dirname(OVERLAY_ENV_PATH), exist_ok=True)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
     tmp = OVERLAY_ENV_PATH + ".tmp"
     with open(tmp, "w") as f:
         for k, v in cur.items():
@@ -174,71 +189,96 @@ def write_overlay_env(updates):
     os.replace(tmp, OVERLAY_ENV_PATH)
 
 
-def read_skin():
+def resolve_wsl_ip(force=False):
+    """Resolve the default WSL-distro's IP via `wsl.exe hostname -I`. Cached
+    forever per process; on connection failure callers can pass force=True to
+    re-resolve (covers `wsl --shutdown` mid-session — NAT-mode IPs drift)."""
+    if not force and WSL_IP_CACHE["ip"]:
+        return WSL_IP_CACHE["ip"]
     try:
-        return open(SKIN_FILE).read().strip() or "orb"
-    except OSError:
-        return "orb"
+        # CREATE_NO_WINDOW: keep the wsl.exe subprocess from popping a console
+        # when launched via pythonw.exe (.pyw double-click).
+        flags = 0x08000000 if os.name == "nt" else 0
+        out = subprocess.run(["wsl.exe", "hostname", "-I"],
+                             capture_output=True, text=True, timeout=3,
+                             creationflags=flags)
+        if out.returncode == 0 and out.stdout.strip():
+            ip = out.stdout.strip().split()[0]
+            WSL_IP_CACHE["ip"] = ip
+            return ip
+    except Exception as e:
+        sys.stderr.write(f"resolve_wsl_ip failed: {e}\n")
+    return None
 
 
-def detect_layout(sw, sh):
-    """Return {fingerprint, primary:(x,y,w,h), ok} for current monitor setup.
-    xrandr-enriched when available (distinguishes Dock/Undock + identifies
-    primary monitor); else falls back to {sw}x{sh} fingerprint with the full
-    virtual screen as the implicit primary."""
-    try:
-        out = subprocess.run(
-            ["xrandr", "--listmonitors"],
-            timeout=1, capture_output=True, text=True, check=True,
-        ).stdout
-    except Exception:
-        return {"fingerprint": f"fallback:{sw}x{sh}",
-                "primary": (0, 0, sw, sh), "ok": False}
+def detect_layout_win():
+    """Enumerate Windows monitors via user32.EnumDisplayMonitors. Mirrors the
+    xrandr-based detect_layout() in bin/cube-overlay.py: returns
+    {fingerprint, primary:(x,y,w,h), ok}. Fingerprint format matches the Linux
+    side so overlay-layouts.json entries stay portable in principle."""
+    user32 = ctypes.windll.user32
 
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    MONITORINFOF_PRIMARY = 0x00000001
+    # HMONITOR isn't on every wintypes vintage; fall back to HANDLE (both
+    # are pointer-sized on the ABI level).
+    HMONITOR = getattr(wintypes, "HMONITOR", wintypes.HANDLE)
+    MonitorEnumProc = ctypes.WINFUNCTYPE(
+        ctypes.c_int,
+        HMONITOR, wintypes.HDC,
+        ctypes.POINTER(wintypes.RECT), wintypes.LPARAM,
+    )
     mons = []
-    primary = None
-    for line in out.splitlines():
-        line = line.strip()
-        if not line or line.startswith("Monitors:"):
-            continue
-        # Format: "0: +*XWAYLAND0 1920/509x1080/286+0+0  XWAYLAND0"
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        flags = parts[1]            # "+*NAME" or "+NAME"
-        is_primary = "*" in flags
-        geom = parts[2]             # "1920/509x1080/286+0+0"
-        try:
-            wh, _, rest = geom.partition("x")
-            w = int(wh.split("/")[0])
-            hpart, _, off = rest.partition("+")
-            h = int(hpart.split("/")[0])
-            xo, _, yo = off.partition("+")
-            x = int(xo); y = int(yo)
-        except (ValueError, IndexError):
-            continue
+    primary = [None]
+
+    def _cb(hmon, _hdc, _rect, _data):  # noqa: ARG001  callback signature
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if not user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            return 1
+        r = mi.rcMonitor
+        x, y = r.left, r.top
+        w, h = r.right - r.left, r.bottom - r.top
+        is_primary = bool(mi.dwFlags & MONITORINFOF_PRIMARY)
         mons.append((x, y, w, h, is_primary))
         if is_primary:
-            primary = (x, y, w, h)
+            primary[0] = (x, y, w, h)
+        return 1
+
+    try:
+        user32.EnumDisplayMonitors(0, None, MonitorEnumProc(_cb), 0)
+    except Exception as e:
+        sys.stderr.write(f"detect_layout_win failed: {e}\n")
+        return None
 
     if not mons:
-        return {"fingerprint": f"fallback:{sw}x{sh}",
-                "primary": (0, 0, sw, sh), "ok": False}
-
-    # Heuristic: no `*` → pick monitor at +0+0, else first by x_off.
-    if primary is None:
+        return None
+    if primary[0] is None:
         zero_off = [m for m in mons if m[0] == 0 and m[1] == 0]
-        primary = (zero_off[0] if zero_off else sorted(mons)[0])[:4]
-
+        primary[0] = (zero_off[0] if zero_off else sorted(mons)[0])[:4]
     mons_sorted = sorted(mons, key=lambda m: (m[0], m[1]))
     fp = f"mon{len(mons)}:" + ",".join(
         f"{w}x{h}+{x}+{y}" for x, y, w, h, _ in mons_sorted
     )
-    return {"fingerprint": fp, "primary": primary, "ok": True}
+    return {"fingerprint": fp, "primary": primary[0], "ok": True}
+
+
+def detect_layout(sw, sh):
+    res = detect_layout_win()
+    if res:
+        return res
+    return {"fingerprint": f"fallback:{sw}x{sh}",
+            "primary": (0, 0, sw, sh), "ok": False}
 
 
 def load_layouts():
-    """Read overlay-layouts.json → dict. {} if missing/unreadable."""
     try:
         with open(LAYOUTS_PATH) as f:
             data = json.load(f)
@@ -248,38 +288,14 @@ def load_layouts():
 
 
 def save_layout_anchor(fp, anchor_r, anchor_b):
-    """Atomic merge-write of overlay-layouts.json for one fingerprint."""
     layouts = load_layouts()
     layouts[fp] = {"anchor_r": int(anchor_r), "anchor_b": int(anchor_b)}
-    os.makedirs(os.path.dirname(LAYOUTS_PATH), exist_ok=True)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
     tmp = LAYOUTS_PATH + ".tmp"
     with open(tmp, "w") as f:
         json.dump(layouts, f, indent=2, sort_keys=True)
         f.write("\n")
     os.replace(tmp, LAYOUTS_PATH)
-
-
-def wslg_probe():
-    """Spawn a tiny decorated Tk window in a subprocess for ~120ms. WSLg bug:
-    after a service restart, overrideredirect (frameless) windows occasionally
-    fail to map until any decorated X11 client surfaces. This nudge wakes the
-    compositor. Window is 1x1 offscreen so user never sees it. Harmless on
-    non-WSLg setups (just a brief extra process). Timeout caps at 3s in case
-    Tk hangs."""
-    script = (
-        "import tkinter as tk\n"
-        "r = tk.Tk()\n"
-        "r.title('cube-probe')\n"
-        "r.geometry('1x1+-2000+-2000')\n"
-        "r.update()\n"
-        "r.after(120, r.destroy)\n"
-        "r.mainloop()\n"
-    )
-    try:
-        subprocess.run([sys.executable, "-c", script],
-                       timeout=3, capture_output=True)
-    except Exception:
-        pass
 
 
 AGELESS_STATES = {"idle", "done", "start"}
@@ -288,8 +304,6 @@ AGELESS_STATES = {"idle", "done", "start"}
 def block_text(sess):
     emoji = EMOJI.get(sess["state"], EMOJI["idle"])
     cwd = sess.get("cwd") or "—"
-    # idle: ambient, no actionable age. done/start: 5s blips, age=0 always.
-    # Other states (thinking/permission/error/compact/alert) show "how long".
     if sess["state"] in AGELESS_STATES:
         return f"{emoji} {cwd}"
     return f"{emoji} {cwd} · {format_age(sess['age_s'])}"
@@ -327,7 +341,6 @@ def usage_color(pct, theme="dark"):
     if pct is None:
         return FG_DIM
     if theme == "light":
-        # Darker variants — saturated mid-tones disappear against light bg.
         if pct >= 80:
             return "#a51010"
         if pct >= 50:
@@ -347,25 +360,40 @@ def usage_label(pct):
 
 
 def main():
+    env = read_overlay_env()
+    default_port = env.get("CUBE_OVERLAY_PORT", os.environ.get("CUBE_OVERLAY_PORT", "8080"))
+    default_mock = os.environ.get("CUBE_OVERLAY_MOCK") or env.get("CUBE_OVERLAY_MOCK")
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mock", default=os.environ.get("CUBE_OVERLAY_MOCK", "http://127.0.0.1:8080"))
+    ap.add_argument("--mock", default=default_mock,
+                    help="full URL override; if omitted, derived from wsl.exe hostname -I")
+    ap.add_argument("--port", default=default_port,
+                    help="mock-cube port on WSL (default 8080)")
     ap.add_argument("--margin", type=int, default=20)
     ap.add_argument("--size", type=int,
-                    default=int(os.environ.get("CUBE_OVERLAY_SIZE", 0)),
-                    help="gif edge length (pixels). 0 = auto-fit to window width.")
+                    default=int(env.get("CUBE_OVERLAY_SIZE", 0)),
+                    help="gif edge length; 0 = auto-fit to window width")
     ap.add_argument("--width", type=int,
-                    default=int(os.environ.get("CUBE_OVERLAY_WIDTH", 0)),
-                    help="window width (0 = derive from size + padding)")
+                    default=int(env.get("CUBE_OVERLAY_WIDTH", 0)),
+                    help="window width; 0 = derive from size + padding")
     ap.add_argument("--max-blocks", type=int,
-                    default=int(os.environ.get("CUBE_OVERLAY_MAX_BLOCKS", 5)),
-                    help="cap on session blocks (default 5)")
-    ap.add_argument("--x", type=int, default=None, help="window X; env CUBE_OVERLAY_X")
-    ap.add_argument("--y", type=int, default=None, help="window Y; env CUBE_OVERLAY_Y")
-    ap.add_argument("--frameless", action="store_true", help="overrideredirect borderless")
+                    default=int(env.get("CUBE_OVERLAY_MAX_BLOCKS", 5)))
+    ap.add_argument("--frameless", action="store_true", default=True,
+                    help="overrideredirect borderless (default on Windows)")
+    ap.add_argument("--decorated", dest="frameless", action="store_false",
+                    help="show window decorations (debug)")
     args = ap.parse_args()
 
+    mock_url = args.mock
+    if not mock_url:
+        ip = resolve_wsl_ip()
+        if not ip:
+            sys.stderr.write("Could not resolve WSL IP via `wsl.exe hostname -I`. "
+                             "Pass --mock http://<ip>:<port> explicitly.\n")
+            sys.exit(2)
+        mock_url = f"http://{ip}:{args.port}"
+
     win_w = args.width if args.width > 0 else max(180, (args.size or 100) + 2 * PAD)
-    # Auto-fit: GIF fills window width minus padding when size wasn't set.
     if args.size <= 0:
         args.size = win_w - 2 * PAD
     metrics = size_metrics(win_w)
@@ -373,10 +401,10 @@ def main():
     usage_h = metrics["usage_h"]
     font_size = metrics["font"]
 
-    # Initial skin + theme. Skin is per-state-source from cube.sh; theme is
-    # the dark/light preference. Both can flip live via right-click menu.
-    skin_name = read_skin()
-    theme_name = os.environ.get("CUBE_OVERLAY_THEME", "dark")
+    # Skin is server-driven on Windows: comes from mock-cube /dashboard.json
+    # ("skin" field). We track it locally for palette + change-detection.
+    skin_name = "orb"
+    theme_name = env.get("CUBE_OVERLAY_THEME", "dark")
     if theme_name not in THEME_NAMES:
         theme_name = "dark"
     pal = palette_for(skin_name, theme_name)
@@ -385,37 +413,26 @@ def main():
     FG_DIM = pal["chrome"]["fg_dim"]
     FG_BRIGHT = pal["chrome"]["fg_bright"]
 
-    # WSLg compositor wake-up before creating the real frameless window.
-    if args.frameless:
-        wslg_probe()
-
     root = tk.Tk()
-    root.title("cube-overlay")
+    root.title("cube-overlay-win")
     if args.frameless:
         root.overrideredirect(True)
+    # Native Windows topmost: respected by the Win32 compositor without the
+    # WSLg focus-steal side effect. No <Visibility> rebind needed.
     root.attributes("-topmost", True)
-    # Passive focus model: the overlay declares it does not actively grab
-    # input focus from other apps. Without this, WSLg pulls text-input focus
-    # from whatever's focused (terminal, editor) on every overlay redraw.
-    try:
-        root.focusmodel("passive")
-    except tk.TclError:
-        pass
     root.configure(bg=BG)
 
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     init_h = PAD + block_h + usage_h + args.size + 2 * PAD
-    # Per-layout anchor: each monitor setup (Dock/Undock, Home/Office)
-    # gets its own bottom-right anchor. Unknown layouts center on the
-    # primary monitor; legacy global anchor migrates into the current
-    # layout on first run.
     layout = detect_layout(sw, sh)
     fp = layout["fingerprint"]
     layouts = load_layouts()
     px, py, pw, ph = layout["primary"]
 
     def _in_bounds(r, b):
-        return 0 < r <= sw and 0 < b <= sh
+        # Windows multi-monitor: secondary monitors can sit at negative
+        # offsets (mon to the left of primary). Use virtual desktop bounds.
+        return r > -10_000 and b > -10_000 and r < 50_000 and b < 50_000
 
     anchor_source = "cache"
     if fp in layouts and _in_bounds(layouts[fp].get("anchor_r", 0),
@@ -423,71 +440,48 @@ def main():
         anchor_right = int(layouts[fp]["anchor_r"])
         anchor_bottom = int(layouts[fp]["anchor_b"])
     else:
-        env_ar = os.environ.get("CUBE_OVERLAY_ANCHOR_R")
-        env_ab = os.environ.get("CUBE_OVERLAY_ANCHOR_B")
-        if env_ar and env_ab and _in_bounds(int(env_ar), int(env_ab)):
-            anchor_right = int(env_ar)
-            anchor_bottom = int(env_ab)
-            anchor_source = "migrate-anchor"
-        elif args.x is not None or args.y is not None \
-             or "CUBE_OVERLAY_X" in os.environ or "CUBE_OVERLAY_Y" in os.environ:
-            legacy_x = args.x if args.x is not None else int(os.environ.get("CUBE_OVERLAY_X", px + pw - win_w - args.margin))
-            legacy_y = args.y if args.y is not None else int(os.environ.get("CUBE_OVERLAY_Y", py + ph - init_h - args.margin))
-            anchor_right = legacy_x + win_w
-            anchor_bottom = legacy_y + init_h
-            anchor_source = "migrate-xy"
-        else:
-            # Center on primary monitor.
-            anchor_right = px + pw // 2 + win_w // 2
-            anchor_bottom = py + ph // 2 + init_h // 2
-            anchor_source = "center"
+        anchor_right = px + pw // 2 + win_w // 2
+        anchor_bottom = py + ph // 2 + init_h // 2
+        anchor_source = "center"
         save_layout_anchor(fp, anchor_right, anchor_bottom)
-
-    # Strip legacy global anchor keys (now stored per-layout).
-    try:
-        write_overlay_env({
-            "CUBE_OVERLAY_ANCHOR_R": None,
-            "CUBE_OVERLAY_ANCHOR_B": None,
-            "CUBE_OVERLAY_X": None,
-            "CUBE_OVERLAY_Y": None,
-        })
-    except Exception:
-        pass
 
     x = anchor_right - win_w
     y = anchor_bottom - init_h
-    print(f"mock={args.mock}  layout={fp}  source={anchor_source}  primary={px},{py},{pw}x{ph}  anchor=br({anchor_right},{anchor_bottom})  pos=+{x}+{y}  win={win_w}x{init_h}  gif={args.size}  max_blocks={args.max_blocks}", file=sys.stderr)
+    sys.stderr.write(
+        f"mock={mock_url}  layout={fp}  source={anchor_source}  "
+        f"primary={px},{py},{pw}x{ph}  anchor=br({anchor_right},{anchor_bottom})  "
+        f"pos=+{x}+{y}  win={win_w}x{init_h}  gif={args.size}  max_blocks={args.max_blocks}\n"
+    )
     root.geometry(f"{win_w}x{init_h}+{x}+{y}")
 
-    # Session blocks container (dynamic children)
     blocks_frame = tk.Frame(root, bd=0, highlightthickness=0, bg=BG)
     blocks_frame.pack(side="top", fill="x", padx=PAD, pady=(PAD, 0))
 
-    # Usage line (separator-style)
     usage_bg = pal["chrome"].get("usage_bg", BG)
     usage_lbl = tk.Label(root, text="", fg=FG_DIM, bg=usage_bg,
                          font=("TkDefaultFont", font_size, "bold"),
                          anchor="w", padx=6, pady=2)
     usage_lbl.pack(side="top", fill="x", padx=PAD, pady=(2, 0))
 
-    # GIF (Char) below
     gif_lbl = tk.Label(root, bd=0, highlightthickness=0, bg=BG)
     gif_lbl.pack(side="bottom", pady=(3, PAD))
 
     cur = {"img": None, "ts": 0, "frames": [], "durs": [], "idx": 0,
            "visible": True, "anim_job": None,
-           "block_widgets": [],    # list of (Frame, Label) tuples
-           "block_sig": None,      # signature of last-rendered session list
+           "block_widgets": [],
+           "block_sig": None,
            "last_height": init_h,
            "anchor_right": anchor_right,
            "anchor_bottom": anchor_bottom,
            "fingerprint": fp,
            "primary": layout["primary"],
-           "hidden_by_user": False,  # set by Hide menu, cleared on state change
-           "hide_winner": None,      # (state, img) at time of hide
+           "hidden_by_user": False,
+           "hide_winner": None,
            "last_winner": None,
            "theme": theme_name,
-           "skin": skin_name}
+           "skin": skin_name,
+           "mock": mock_url,
+           "consecutive_failures": 0}
 
     def hide():
         if cur["anim_job"]:
@@ -516,26 +510,31 @@ def main():
             root.after_cancel(cur["anim_job"])
             cur["anim_job"] = None
         gif_lbl.configure(image=cur["frames"][0])
+        # gif_lbl's reqheight is 1 until an image is bound. Resize once after
+        # first load so the window grows to fit the GIF instead of cropping
+        # the top/bottom edges.
+        resize_window(0)
         if len(cur["frames"]) > 1:
             cur["anim_job"] = root.after(durs[0], animate)
 
-    def resize_window(n_blocks):
-        h = PAD + max(1, n_blocks) * (block_h + 2) + usage_h + args.size + 2 * PAD
-        if h == cur["last_height"]:
+    def resize_window(_n_blocks):
+        # Tk-true height: Windows-Tk font rendering at DPI-aware scale doesn't
+        # match the WSLg formula (PAD + n*(block_h+2) + usage_h + size + 2*PAD)
+        # well — the static estimate undercounts and the GIF gets clipped.
+        # Let Tk compute the actual required height after widget repacks.
+        root.update_idletasks()
+        h = root.winfo_reqheight()
+        if h <= 1 or h == cur["last_height"]:
             return
-        # Anchor bottom-right: window grows upward, not downward.
         new_x = cur["anchor_right"] - win_w
         new_y = cur["anchor_bottom"] - h
         root.geometry(f"{win_w}x{h}+{new_x}+{new_y}")
         cur["last_height"] = h
 
     def render_sessions(sessions):
-        # Cap + overflow marker. Sessions already PRIO-sorted from mock.
         shown = sessions[: args.max_blocks]
         overflow = max(0, len(sessions) - args.max_blocks)
-        # Signature: per-session tuple. Ageless states (idle/done/start) drop
-        # age from the sig (no rerender on tick); others use 30s buckets so
-        # per-second changes don't trigger re-render. Plus overflow count.
+
         def _sig_entry(s):
             return (s["cwd"], s["state"]) if s["state"] in AGELESS_STATES \
                    else (s["cwd"], s["state"], s["age_s"] // 30)
@@ -547,7 +546,6 @@ def main():
         widgets = cur["block_widgets"]
         needed = len(shown) + (1 if overflow else 0)
 
-        # Grow widget pool
         cursor = cur.get("cursor", "")
         while len(widgets) < needed:
             fr = tk.Frame(blocks_frame, bd=0, highlightthickness=0, bg=BG,
@@ -559,12 +557,10 @@ def main():
             fr.pack(fill="x", pady=(0, 2))
             widgets.append((fr, lbl))
 
-        # Shrink widget pool
         while len(widgets) > needed:
             fr, _ = widgets.pop()
             fr.destroy()
 
-        # Update text + colors (per-skin/theme state palette)
         states_pal = palette_for(cur["skin"], cur["theme"])["states"]
         for i, sess in enumerate(shown):
             vis = states_pal.get(sess["state"], states_pal["idle"])
@@ -583,38 +579,43 @@ def main():
                             fg=usage_color(pct, cur["theme"]))
 
     def poll():
-        # No periodic topmost/lift — WSLg interprets that as a focus-grab
-        # signal. Visibility-driven lift below handles "obscured by other
-        # window" without stealing focus.
-        s = fetch_dashboard(args.mock)
+        s = fetch_dashboard(cur["mock"])
         if s is None:
+            cur["consecutive_failures"] += 1
+            # After 3 consecutive misses, the WSL IP may have drifted
+            # (NAT-mode reassigns on `wsl --shutdown`). Re-resolve and
+            # rebuild the mock URL.
+            if cur["consecutive_failures"] == 3 and not args.mock:
+                new_ip = resolve_wsl_ip(force=True)
+                if new_ip:
+                    new_url = f"http://{new_ip}:{args.port}"
+                    if new_url != cur["mock"]:
+                        sys.stderr.write(f"wsl-ip drift: {cur['mock']} -> {new_url}\n")
+                        cur["mock"] = new_url
             root.after(POLL_MS * 4, poll)
             return
-        # Detect external skin change (menu-driven or cube.sh from terminal).
-        live_skin = read_skin()
+        cur["consecutive_failures"] = 0
+        # Skin from mock (server-driven). cube.sh in WSL is the source of
+        # truth; this overlay observes it.
+        live_skin = s.get("skin") or "orb"
         if live_skin != cur["skin"]:
             apply_palette(live_skin, cur["theme"])
         update_dashboard(s)
         if (s.get("img"), s.get("ts")) != (cur["img"], cur["ts"]):
-            data = fetch_gif(args.mock)
+            data = fetch_gif(cur["mock"])
             if data:
                 load(data)
                 cur["img"] = s.get("img")
                 cur["ts"] = s.get("ts")
         winner = (s.get("state"), s.get("img"))
         cur["last_winner"] = winner
-        # Auto-reopen: if user hid the overlay, watch for the winner to change.
         if cur["hidden_by_user"]:
             if winner != cur["hide_winner"]:
                 cur["hidden_by_user"] = False
                 show()
-            # else stay hidden, keep polling
         else:
             show()
         root.after(POLL_MS, poll)
-
-    # Idle no longer auto-hides; overlay stays visible as ambient display.
-    # User-driven hide is via right-click menu (re-shows on next state change).
 
     def user_hide():
         cur["hidden_by_user"] = True
@@ -622,8 +623,6 @@ def main():
         hide()
 
     def menu_kwargs():
-        """Chrome-derived kwargs for tk.Menu — keeps right-click menu visually
-        consistent with the overlay's skin/theme instead of the system default."""
         pal = palette_for(cur["skin"], cur["theme"])
         return dict(
             bg=pal["chrome"]["bg"],
@@ -634,7 +633,6 @@ def main():
         )
 
     def apply_palette(skin, theme):
-        """Update chrome + state-block colors to the (skin, theme) palette."""
         global BG, FG_DIM, FG_BRIGHT
         pal = palette_for(skin, theme)
         BG = pal["chrome"]["bg"]
@@ -647,58 +645,60 @@ def main():
         gif_lbl.configure(bg=BG)
         cur["skin"] = skin
         cur["theme"] = theme
-        # Force re-render so block bgs/fgs + overflow row pick up new palette.
         cur["block_sig"] = None
-        # Re-theme menus (created later; cur["menus"] absent on initial run).
         for m in cur.get("menus") or ():
             try:
                 m.configure(**menu_kwargs())
             except tk.TclError:
                 pass
+        # Sync skin radiobutton with server-driven changes (CLI cube.sh skin
+        # …, or another overlay's menu click). NameError-guarded because
+        # apply_palette can fire from poll() before skin_var exists during
+        # very early init.
+        try:
+            skin_var.set(skin)
+        except NameError:
+            pass
 
     def set_theme(name):
         apply_palette(cur["skin"], name)
         write_overlay_env({"CUBE_OVERLAY_THEME": name})
 
     def set_skin(name):
-        cube = os.path.expanduser("~/.claude/bin/cube.sh")
+        # Route through mock-cube's /set?skin=NAME — mock-cube proxies to
+        # cube.sh skin + redisplay in WSL. The redisplay push updates
+        # STATE.img server-side; the next poll cycle picks up the new skin
+        # and re-applies the palette automatically.
         try:
-            subprocess.run([cube, "skin", name], timeout=3, capture_output=True)
-            # Force an immediate re-push of the current aggregated state under
-            # the new skin so the GIF flips now, not at the next state change.
-            subprocess.run([cube, "redisplay"], timeout=3, capture_output=True)
-        except Exception:
-            pass
+            urllib.request.urlopen(f"{cur['mock']}/set?skin={name}", timeout=2).read()
+        except Exception as e:
+            sys.stderr.write(f"set_skin({name}) failed: {e}\n")
 
     def restart_overlay():
+        # pythonw.exe (for .pyw) doesn't open a console; DETACHED_PROCESS
+        # ensures the new instance survives the current's destroy().
+        flags = 0x00000008 if os.name == "nt" else 0  # DETACHED_PROCESS
         try:
-            subprocess.Popen(["systemctl", "--user", "restart", SERVICE_NAME])
-        except Exception:
-            pass
+            subprocess.Popen([sys.executable] + sys.argv,
+                             creationflags=flags, close_fds=True)
+        except Exception as e:
+            sys.stderr.write(f"restart failed: {e}\n")
+            return
+        root.after(150, root.destroy)
 
     def reset_position():
-        # Reset = bottom-right of the current layout's primary monitor.
-        # CUBE_OVERLAY_RESET_R/_B env wins if set (deprecated, kept for one
-        # release for users with custom home anchors in their config).
         px, py, pw, ph = cur["primary"]
-        env_r = os.environ.get("CUBE_OVERLAY_RESET_R")
-        env_b = os.environ.get("CUBE_OVERLAY_RESET_B")
-        reset_r = int(env_r) if env_r else px + pw
-        reset_b = int(env_b) if env_b else py + ph
-        save_layout_anchor(cur["fingerprint"], reset_r, reset_b)
+        save_layout_anchor(cur["fingerprint"], px + pw, py + ph)
         restart_overlay()
 
     def set_size(w):
-        # Anchor (bottom-right) is persistent across sizes — new window grows
-        # up-and-left from the same corner. No X/Y to write here.
         write_overlay_env({"CUBE_OVERLAY_WIDTH": str(w), "CUBE_OVERLAY_SIZE": None})
         restart_overlay()
 
-    # Tk variables for radiobutton sync
     theme_var = tk.StringVar(value=theme_name)
-    skin_var = tk.StringVar(value=read_skin())
+    skin_var = tk.StringVar(value=cur["skin"])
     size_var = tk.IntVar(value=win_w)
-    lock_var = tk.BooleanVar(value=os.environ.get("CUBE_OVERLAY_POSITION_LOCKED", "1") == "1")
+    lock_var = tk.BooleanVar(value=env.get("CUBE_OVERLAY_POSITION_LOCKED", "1") == "1")
 
     def apply_cursor():
         c = "" if lock_var.get() else "fleur"
@@ -746,23 +746,16 @@ def main():
     cur["menus"] = (menu, theme_m, skin_m, pos_m, size_m)
 
     def show_menu(ev):
-        # Anchor the menu at the overlay's left edge so it grows rightward
-        # into screen real-estate, not into the right-monitor void when the
-        # overlay sits at the right edge.
         try:
             menu.tk_popup(root.winfo_rootx(), ev.y_root)
         finally:
             menu.grab_release()
 
-    # Drag-to-reposition (only when not locked via menu)
     drag = {"active": False, "off_x": 0, "off_y": 0}
 
     def drag_start(ev):
         if lock_var.get():
             return
-        # bind_all catches Button-1 on menu items too; skip those so clicking
-        # Reset/Size/etc. doesn't engage the drag system + clobber the menu's
-        # write in drag_end.
         try:
             if ev.widget.winfo_class() == "Menu":
                 return
@@ -785,8 +778,6 @@ def main():
         drag["active"] = False
         new_x = root.winfo_rootx()
         new_y = root.winfo_rooty()
-        # New anchor = current bottom-right corner. Persist per-layout so
-        # other monitor setups keep their own positions.
         cur["anchor_right"] = new_x + win_w
         cur["anchor_bottom"] = new_y + cur["last_height"]
         try:
@@ -803,21 +794,10 @@ def main():
     root.bind_all("<Button-3>", show_menu)
     root.bind("<Escape>", lambda _e: root.destroy())
 
-    # On X11, when another window covers ours we get a VisibilityNotify with
-    # state=VisibilityFullyObscured. lift() then raises us back without the
-    # focus-grab that -topmost/wm_attributes trigger on WSLg.
-    def _on_visibility(ev):
-        try:
-            state = str(ev.state)
-        except Exception:
-            return
-        if "Obscured" in state:
-            try:
-                root.lift()
-            except tk.TclError:
-                pass
-    root.bind("<Visibility>", _on_visibility)
-
+    # One-shot height refine after Tk lays out the empty widgets — covers the
+    # gap before the first GIF arrives so the window doesn't open with a
+    # visibly cropped GIF row.
+    root.after_idle(lambda: resize_window(0))
     root.after(100, poll)
     root.mainloop()
 

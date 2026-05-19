@@ -92,6 +92,9 @@ cube/
 │   ├── mock-cube.service ← systemd --user Unit für mock-cube
 │   ├── cube-overlay.py   ← Frameless Tk-Window (WSLg), spiegelt mock-cube auf Desktop
 │   ├── cube-overlay.service ← systemd --user Unit für overlay
+│   ├── win/
+│   │   ├── cube-overlay-win.pyw ← Windows-natives Overlay (CPython+Tk, WSLg-frei)
+│   │   └── README.md            ← Setup für Windows-Host (POC)
 │   ├── deploy.sh         ← Sync bin/* → ~/.claude/bin/ + systemd-Units
 │   ├── cycle.sh          ← Visueller Smoke-Test
 │   └── clear-old.sh      ← Räumt Cube auf (Dry-run + --force)
@@ -326,16 +329,19 @@ echo "CUBE_MIRROR=127.0.0.1:8080" >> ~/.config/cube/config
   historisches Max — Anthropic publiziert keine exakten Max-Plan-Limits)
 - `~/.config/cube/overlay.env` — Overlay-Settings pro Maschine, vom Menü
   geschrieben:
-  - `CUBE_OVERLAY_ANCHOR_R` / `_B` — Bottom-Right-Anchor (bleibt fix bei
-    Size-Wechsel; Fenster wächst nach oben/links davon)
-  - `CUBE_OVERLAY_RESET_R` / `_B` — Reset-Menü Landing-Anchor (default
-    3838/1030 = Mitte-Monitor rechts-unten im typischen WSLg-Dual-Monitor)
   - `CUBE_OVERLAY_WIDTH` — 140/180/240 für Small/Medium/Large (Font + GIF
     skalieren mit)
   - `CUBE_OVERLAY_SIZE` — GIF-Edge, 0/unset = auto-fit zur Width
   - `CUBE_OVERLAY_THEME` — `dark` (default) oder `light`
   - `CUBE_OVERLAY_POSITION_LOCKED` — `1` Locked (default), `0` für Drag
   - `CUBE_OVERLAY_MAX_BLOCKS` — wie viele Session-Blöcke sichtbar (default 5)
+  - `CUBE_OVERLAY_RESET_R` / `_B` — **deprecated** Override für Reset-Menü;
+    default ist jetzt rechts-unten am Primary-Monitor des aktuellen Layouts
+- `~/.config/cube/overlay-layouts.json` — **per-Layout Bottom-Right-Anchor**.
+  Jedes Monitor-Setup (Dock/Undock, Home/Office) bekommt einen Eintrag,
+  Fingerprint via `xrandr --listmonitors` (oder `fallback:{sw}x{sh}` ohne
+  xrandr). Unbekanntes Layout → Overlay zentriert auf Primary-Monitor.
+  Drag + Reset schreiben hier rein, kein manuelles Editieren nötig.
 
 Hi-res Overlay-Assets (optional): `assets/desktop/<skin>/<state>.gif` —
 mock-cube serviert diese bevorzugt vor `assets/<skin>/`, sodass das Overlay
@@ -403,6 +409,28 @@ Workarounds wenn unverzichtbar:
   topmost-ohne-focus-grab markiert (einmalige Einrichtung, ewig stabil)
 - Web-Overlay (HTML-Page die `localhost:8080/dashboard.json` pollt) statt Tk —
   läuft im Windows-Browser, WSLg-immun, aber größeres Refactor
+- **Windows-natives Overlay** (`bin/win/cube-overlay-win.pyw`, siehe unten) —
+  umgeht WSLg komplett.
+
+### Windows-natives Overlay (POC)
+
+Alternativ läuft das Overlay direkt als Windows-CPython-Prozess (`pythonw.exe`)
+und pollt mock-cube über die WSL-Distro-IP (`wsl.exe hostname -I`). Damit
+verschwinden Focus-Steal, Re-Lift-Hack und der `127.0.0.1`-Konflikt mit
+Docker-Containern — Traffic geht WSL-IP-direkt, kein localhost-Forward.
+
+Voraussetzungen Windows-seitig: Python 3.11+, `py -m pip install --user Pillow`.
+WSL-seitig: `CUBE_MOCK_HOST=0.0.0.0` in `~/.config/cube/config` setzen +
+`systemctl --user restart mock-cube.service`. Setup-Details, CLI-Flags und
+Troubleshooting: [`bin/win/README.md`](bin/win/README.md).
+
+Skin-Wechsel aus dem Windows-Overlay routet via `GET /set?skin=NAME` an
+mock-cube, das zu `cube.sh skin NAME` + `cube.sh redisplay` proxyt;
+`~/.claude/.cube-skin` (WSL) bleibt Source of Truth, beide Overlays
+synchronisieren über die Poll-Loop. Theme / Position / Size sind lokal im
+Windows-Menü mutable (gespeichert unter `%APPDATA%\cube\`). Beide Overlays
+(`cube-overlay.py` für WSLg + `cube-overlay-win.pyw` für Windows-nativ)
+existieren parallel — User wählt je nach Setup.
 
 ## Quellen / Inspiration
 
