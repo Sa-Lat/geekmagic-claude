@@ -57,7 +57,7 @@ if os.name == "nt":
     except Exception:
         pass
 
-from PIL import Image, ImageSequence, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageSequence, ImageTk
 
 POLL_MS = 500
 PAD = 6
@@ -94,9 +94,49 @@ THEME_NAMES = ("dark", "light")
 # Palettes mirror bin/cube-overlay.py:54-120. Kept verbatim — when adding a
 # new skin or theme, update both files in lockstep.
 EMOJI = {
+    # No VS16 (U+FE0F) needed — we render via PIL + seguiemj.ttf, which only
+    # contains emoji glyphs, so presentation hint is redundant. Worse: VS16
+    # makes font.getbbox treat the string as 2 codepoints wide and breaks
+    # per-glyph centering (visual: glyph clipped to one side).
     "permission": "🔐", "error": "❌", "compact": "📦", "alert": "⚠",
     "thinking":   "⚙",  "done":  "✅", "start":   "👋", "idle":  "💤",
 }
+
+# Tk 8.6 on Windows can't render color emoji — GDI's text path has no
+# COLR/CPAL support, so Tk falls back to Segoe UI Symbol mono glyphs that
+# look thin and washed out (especially U+2699 GEAR, U+26A0 WARNING). Workaround:
+# pre-render each emoji via PIL using seguiemj.ttf and display as a
+# PhotoImage next to the text via Label compound="left".
+#  VS16 (U+FE0F) on ⚠️/⚙️ tells PIL to use the emoji glyph table, not the
+# text-style variant.
+EMOJI_FONT_PATH = os.path.join(
+    os.environ.get("SystemRoot", "C:\\Windows"), "Fonts", "seguiemj.ttf"
+)
+
+
+def render_color_emoji(char, px_size):
+    # Canvas is slightly larger than px_size for breathing room. Each glyph is
+    # centered using its actual bbox — seguiemj.ttf glyphs have varying bearings
+    # (U+274C CROSS sits high, U+2699 GEAR more centered) so drawing at a fixed
+    # offset gives an uneven optical-center across states. font.getbbox lets us
+    # offset per-glyph so all emojis land centered in the canvas.
+    margin = 1
+    canvas = px_size + 2 * margin
+    img = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    try:
+        # seguiemj.ttf is a bitmap-color font (PNG glyphs at 16/24/36/48/72/96/128).
+        # ImageFont.truetype picks the closest size and scales.
+        font = ImageFont.truetype(EMOJI_FONT_PATH, px_size)
+        bbox = font.getbbox(char)
+        gw, gh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x = (canvas - gw) // 2 - bbox[0]
+        y = (canvas - gh) // 2 - bbox[1]
+        ImageDraw.Draw(img).text((x, y), char, font=font, embedded_color=True)
+    except Exception:
+        # Font missing or render fails (very old Windows / pre-Pillow-9.2):
+        # leave the transparent image so the label still renders without emoji.
+        pass
+    return img
 SKIN_PALETTES = {
     "orb": {
         "dark": {
@@ -324,11 +364,11 @@ AGELESS_STATES = {"idle", "done", "start"}
 
 
 def block_text(sess):
-    emoji = EMOJI.get(sess["state"], EMOJI["idle"])
+    # Emoji is supplied as a PhotoImage via compound="left", not in the text.
     cwd = sess.get("cwd") or "—"
     if sess["state"] in AGELESS_STATES:
-        return f"{emoji} {cwd}"
-    return f"{emoji} {cwd} · {format_age(sess['age_s'])}"
+        return cwd
+    return f"{cwd} · {format_age(sess['age_s'])}"
 
 
 def fetch_dashboard(mock):
@@ -440,8 +480,12 @@ def main():
     if args.frameless:
         root.overrideredirect(True)
     # Native Windows topmost: respected by the Win32 compositor without the
-    # WSLg focus-steal side effect. No <Visibility> rebind needed.
-    root.attributes("-topmost", True)
+    # WSLg focus-steal side effect. Default on for compatibility with the
+    # previous always-on-top behavior; user can disable via menu when a
+    # full-screen IDE is more important than ambient status visibility.
+    topmost_default = env.get("CUBE_OVERLAY_TOPMOST", "1") == "1"
+    lift_activity_default = env.get("CUBE_OVERLAY_LIFT_ON_ACTIVITY", "0") == "1"
+    root.attributes("-topmost", topmost_default)
     root.configure(bg=BG)
 
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -481,7 +525,7 @@ def main():
 
     usage_bg = pal["chrome"].get("usage_bg", BG)
     usage_lbl = tk.Label(root, text="", fg=FG_DIM, bg=usage_bg,
-                         font=("TkDefaultFont", font_size, "bold"),
+                         font=("Segoe UI Semibold", font_size),
                          anchor="w", padx=6, pady=2)
     usage_lbl.pack(side="top", fill="x", padx=PAD, pady=(2, 0))
 
@@ -507,7 +551,23 @@ def main():
            "win_w": win_w,
            "gif_size": args.size,
            "metrics": metrics,
-           "last_gif_bytes": None}
+           "last_gif_bytes": None,
+           "emoji_imgs": {}}
+
+    def emoji_img_for(char, font_size):
+        # Match emoji height roughly to the text cap-height so the row stays
+        # compact and emoji+text feel optically aligned. PhotoImage instances
+        # are cached by (char, px) — Tk requires the PhotoImage object to stay
+        # alive while displayed, so the cache lives on cur and is reset by
+        # apply_size().
+        px = font_size + 4
+        key = (char, px)
+        img = cur["emoji_imgs"].get(key)
+        if img is None:
+            pil = render_color_emoji(char, px)
+            img = ImageTk.PhotoImage(pil)
+            cur["emoji_imgs"][key] = img
+        return img
 
     def hide():
         if cur["anim_job"]:
@@ -576,8 +636,9 @@ def main():
         while len(widgets) < needed:
             fr = tk.Frame(blocks_frame, bd=0, highlightthickness=0, bg=BG,
                           cursor=cursor)
-            lbl = tk.Label(fr, text="", bg=BG, fg=FG_BRIGHT,
-                           font=("TkDefaultFont", cur["metrics"]["font"], "bold"),
+            lbl = tk.Label(fr, text="", image="", compound="left",
+                           bg=BG, fg=FG_BRIGHT,
+                           font=("Segoe UI Semibold", cur["metrics"]["font"]),
                            anchor="w", padx=6, pady=2, cursor=cursor)
             lbl.pack(fill="x")
             fr.pack(fill="x", pady=(0, 2))
@@ -591,10 +652,16 @@ def main():
         for i, sess in enumerate(shown):
             vis = states_pal.get(sess["state"], states_pal["idle"])
             _, lbl = widgets[i]
-            lbl.configure(text=block_text(sess), bg=vis["bg"], fg=vis["fg"])
+            emoji_char = EMOJI.get(sess["state"], EMOJI["idle"])
+            emoji_img = emoji_img_for(emoji_char, cur["metrics"]["font"])
+            # Leading space gives the text breathing room next to the emoji
+            # since compound="left" doesn't add a configurable image-text gap.
+            lbl.configure(image=emoji_img, text=" " + block_text(sess),
+                          bg=vis["bg"], fg=vis["fg"])
         if overflow:
             _, lbl = widgets[len(shown)]
-            lbl.configure(text=f"  +{overflow} more", bg=BG, fg=FG_DIM)
+            lbl.configure(image="", text=f"  +{overflow} more",
+                          bg=BG, fg=FG_DIM)
 
         resize_window(needed)
 
@@ -635,7 +702,17 @@ def main():
                 cur["img"] = s.get("img")
                 cur["ts"] = s.get("ts")
         winner = (s.get("state"), s.get("img"))
+        prev_winner = cur["last_winner"]
         cur["last_winner"] = winner
+        # Auto-lift when a new non-idle state shows up. The prev_winner None
+        # guard skips the first poll cycle so the overlay doesn't slam to
+        # front on every startup. Idle is excluded because revert-to-idle
+        # carries no attention value (hook finished, nothing happened).
+        if (lift_activity_var.get()
+                and prev_winner is not None
+                and prev_winner != winner
+                and winner[0] != "idle"):
+            bring_to_front()
         if cur["hidden_by_user"]:
             if winner != cur["hide_winner"]:
                 cur["hidden_by_user"] = False
@@ -733,7 +810,7 @@ def main():
         cur["win_w"] = w
         cur["gif_size"] = w - 2 * PAD
         cur["metrics"] = size_metrics(w)
-        new_font = ("TkDefaultFont", cur["metrics"]["font"], "bold")
+        new_font = ("Segoe UI Semibold", cur["metrics"]["font"])
         usage_lbl.configure(font=new_font)
         for _fr, lbl in cur["block_widgets"]:
             try:
@@ -742,6 +819,7 @@ def main():
                 pass
         cur["block_sig"] = None
         cur["last_height"] = 0  # force resize_window to re-apply geometry
+        cur["emoji_imgs"] = {}  # re-render emoji at new font size
         if cur.get("last_gif_bytes"):
             load(cur["last_gif_bytes"])
         else:
@@ -756,6 +834,8 @@ def main():
     skin_var = tk.StringVar(value=cur["skin"])
     size_var = tk.IntVar(value=win_w)
     lock_var = tk.BooleanVar(value=env.get("CUBE_OVERLAY_POSITION_LOCKED", "1") == "1")
+    topmost_var = tk.BooleanVar(value=topmost_default)
+    lift_activity_var = tk.BooleanVar(value=lift_activity_default)
 
     def apply_cursor():
         c = "" if lock_var.get() else "fleur"
@@ -775,6 +855,26 @@ def main():
     def toggle_lock():
         write_overlay_env({"CUBE_OVERLAY_POSITION_LOCKED": "1" if lock_var.get() else "0"})
         apply_cursor()
+
+    def toggle_topmost():
+        on = topmost_var.get()
+        root.attributes("-topmost", on)
+        write_overlay_env({"CUBE_OVERLAY_TOPMOST": "1" if on else "0"})
+
+    def toggle_lift_activity():
+        write_overlay_env({"CUBE_OVERLAY_LIFT_ON_ACTIVITY":
+                           "1" if lift_activity_var.get() else "0"})
+
+    def bring_to_front():
+        # Flicker -topmost on->off to lift the window above the current Win32
+        # z-order without leaving it always-on-top. SetForegroundWindow would
+        # be the "proper" call but Win10/11 foreground-lock rules block it
+        # from a background process — the -topmost toggle bypasses that and
+        # also avoids the focus-steal side effect (Tk's lift() alone does
+        # nothing if the target sits behind a topmost window).
+        root.attributes("-topmost", True)
+        root.lift()
+        root.after(50, lambda: root.attributes("-topmost", topmost_var.get()))
 
     mk = menu_kwargs()
     menu = tk.Menu(root, tearoff=0, **mk)
@@ -797,10 +897,18 @@ def main():
         size_m.add_radiobutton(label=f"{label} ({w}px)", variable=size_var,
                                value=w, command=lambda x=w: set_size(x))
     menu.add_cascade(label="Size", menu=size_m)
+    window_m = tk.Menu(menu, tearoff=0, **mk)
+    window_m.add_checkbutton(label="Always on Top", variable=topmost_var,
+                             command=toggle_topmost)
+    window_m.add_checkbutton(label="Lift on Activity",
+                             variable=lift_activity_var,
+                             command=toggle_lift_activity)
+    window_m.add_command(label="Bring to Front", command=bring_to_front)
+    menu.add_cascade(label="Window", menu=window_m)
     menu.add_separator()
     menu.add_command(label="Hide", command=user_hide)
     menu.add_command(label="Quit", command=root.destroy)
-    cur["menus"] = (menu, theme_m, skin_m, pos_m, size_m)
+    cur["menus"] = (menu, theme_m, skin_m, pos_m, size_m, window_m)
 
     def show_menu(ev):
         try:
