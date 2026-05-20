@@ -1,33 +1,40 @@
 #!/usr/bin/env python3
-r"""cube-overlay-win — Windows-native variant of bin/cube-overlay.py.
+r"""cube-overlay-win — Mochi Classic, Windows-native variant.
 
-Runs on Windows-host (CPython + Tk + Pillow) and polls mock-cube inside WSL via
-the WSL-distro IP (resolved at startup with `wsl.exe hostname -I`). Avoids
-WSLg's overrideredirect/topmost/focus-steal pain and the localhost-forwarding
-race with Docker port binds — traffic goes WSL-IP-direct, never via 127.0.0.1.
+Runs on Windows-host (CPython + Tk + Pillow) and polls mock-cube inside
+WSL via the WSL-distro IP (resolved at startup with `wsl.exe hostname -I`).
+Avoids WSLg's overrideredirect/topmost/focus-steal pain and the localhost-
+forwarding race with Docker port binds — traffic goes WSL-IP-direct.
+
+Visual system (Mochi Classic):
+  - Matte card surface (skin × theme palette). Outer corners square; the
+    GIF gets rounded corners via Pillow alpha-mask composited against the
+    card colour.
+  - Sessions: small coloured dot (state) · cwd (truncated) · meta.
+    Meta = age for live states, state label for ageless.
+  - Usage bar: tk.Canvas, colour shifts at 50/80%.
+  - No emoji — the entire seguiemj.ttf + PIL color-emoji renderer the
+    previous overlay needed is gone. Mochi encodes state via the dot only.
 
 Setup (one-time):
-  1. Install Python 3.11+ for Windows (Microsoft Store or python.org).
+  1. Install Python 3.11+ for Windows.
   2. py -m pip install --user Pillow
   3. In WSL: set CUBE_MOCK_HOST=0.0.0.0 in ~/.config/cube/config, restart
      mock-cube  (`systemctl --user restart mock-cube.service`).
-  4. Double-click bin/win/cube-overlay-win.pyw or run `py cube-overlay-win.pyw`
-     from Windows-side cmd/PowerShell.
+  4. Double-click bin/win/cube-overlay-win.pyw.
 
-Per-machine config lives under %APPDATA%\cube\ (mirrors the WSL ~/.config/cube/
-layout: overlay.env + overlay-layouts.json).
+Per-machine config lives under %APPDATA%\cube\.
 
-POC scope (see plan): read-only against mock-cube. Skin selection is server-
-driven (whatever cube.sh in WSL has set); Theme/Position/Size still
-local-mutable from the right-click menu. Skin changes are routed via
-`/set?skin=NAME` on mock-cube, which proxies to `cube.sh skin NAME` +
-`cube.sh redisplay` in WSL so the WSL source of truth (`~/.claude/.cube-skin`)
-stays authoritative.
+Skin is server-driven on Windows (whatever cube.sh in WSL has set);
+Theme/Position/Size/Topmost still local-mutable via right-click menu.
+Skin changes are routed via `/set?skin=NAME` on mock-cube, which proxies
+to `cube.sh skin NAME` + `cube.sh redisplay` in WSL.
 """
 import argparse
 import ctypes
 import io
 import json
+import math
 import os
 import subprocess
 import sys
@@ -36,10 +43,8 @@ import traceback
 import urllib.request
 from ctypes import wintypes
 
-# pythonw.exe (used for .pyw startup) has no console — sys.stderr is wired to
-# NUL, so anything we'd normally print for diagnostics gets silently lost,
-# and an uncaught exception kills the process invisibly. Redirect stderr to a
-# log file early so silent startup crashes are debuggable.
+# pythonw.exe (.pyw startup) has no console — wire stderr to a log file
+# early so silent startup crashes are debuggable.
 if os.name == "nt":
     try:
         _log_path = os.path.join(
@@ -57,15 +62,31 @@ if os.name == "nt":
     except Exception:
         pass
 
-from PIL import Image, ImageDraw, ImageFont, ImageSequence, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageSequence, ImageTk
 
 POLL_MS = 500
-PAD = 6
+WINDOW_CORNER_RADIUS = 22  # outer card radius; matches Mochi gif_radius scale
 
-# Windows scaling: opt into per-monitor DPI awareness so Tk doesn't get
-# bitmap-scaled (blurry) on >100% scaling. SetProcessDpiAwareness(2) =
-# PROCESS_PER_MONITOR_DPI_AWARE. Falls back to SetProcessDPIAware on older
-# Windows.
+
+def apply_round_corners(hwnd, w, h, r=WINDOW_CORNER_RADIUS):
+    """Clip frameless Tk window outline to a rounded rect via SetWindowRgn.
+
+    DWMWA_WINDOW_CORNER_PREFERENCE doesn't apply to overrideredirect windows
+    (no non-client area for DWM to round). SetWindowRgn shapes the actual
+    window region — corners are mildly aliased but match the Mochi card."""
+    if os.name != "nt" or not hwnd:
+        return
+    try:
+        gdi32 = ctypes.windll.gdi32
+        user32 = ctypes.windll.user32
+        # CreateRoundRectRgn: bottom/right are exclusive, so +1.
+        rgn = gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r)
+        user32.SetWindowRgn(hwnd, rgn, True)  # OS owns rgn after this call
+    except Exception as e:
+        sys.stderr.write(f"apply_round_corners failed: {e}\n")
+
+# Per-monitor DPI awareness so Tk doesn't get bitmap-scaled (blurry) on
+# >100% scaling.
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except (AttributeError, OSError):
@@ -75,12 +96,57 @@ except (AttributeError, OSError):
         pass
 
 
-def size_metrics(win_w):
-    if win_w < 160:
-        return {"font": 8, "block_h": 18, "usage_h": 15}
-    if win_w < 220:
-        return {"font": 9, "block_h": 22, "usage_h": 18}
-    return {"font": 11, "block_h": 28, "usage_h": 22}
+# ─────────────────────────────────────────────────────────────────────────
+# Dot rendering — PIL-rasterized AA dots with Gaussian glow halo.
+# Replaces tk.Canvas.create_oval (no AA, no alpha). Active states pulse
+# the halo alpha; idle/done/start render once at a fixed intensity.
+# ─────────────────────────────────────────────────────────────────────────
+DOT_FRAMES = 14                       # cycle length
+DOT_TICK_MS = 70                      # ~14*70ms ≈ 1s breathing period
+PULSE_STATES = {"permission", "error", "compact", "alert", "thinking"}
+STATIC_PHASE = 0.55                   # idle/done/start glow level
+
+
+def _dot_phase(i):
+    """Sine-eased phase 0.3..1.0. Never zero — dots stay readable."""
+    s = (math.sin(2 * math.pi * i / DOT_FRAMES - math.pi / 2) + 1) / 2
+    return 0.3 + 0.7 * s
+
+
+def render_dot(color_hex, render_px, phase, card_hex):
+    """Flat-RGB dot with AA core + soft halo, baked on card-coloured bg.
+
+    Returns RGB (no alpha). The dot's edges blend into the card color
+    inside the PIL image itself, so Tk just blits — no straight-alpha
+    composite at the widget layer, no LANCZOS-edge grey fringe.
+
+    Pulse modulates BOTH halo alpha (40..255) and halo radius
+    (0.20..0.28 of size). On dark themes the radius motion is the
+    primary visual cue because alpha differences read smaller against
+    low-luminance bg."""
+    scale = 4
+    W = render_px * scale
+    cr, cg, cb = _hex_to_rgb(color_hex)
+    bg = _hex_to_rgb(card_hex)
+    cx = cy = W // 2
+    # Core breathes too — small but perceptible heartbeat. Dark themes
+    # rely on this more than alpha (alpha contrast against dark bg
+    # reads weaker perceptually).
+    core_r = int(W * (0.13 + 0.06 * phase))
+    halo_r = int(W * (0.20 + 0.10 * phase))
+    blur_r = int(W * 0.08)
+    halo_alpha = int(25 + 230 * phase)
+    base = Image.new("RGBA", (W, W), bg + (255,))
+    halo = Image.new("RGBA", (W, W), (0, 0, 0, 0))
+    ImageDraw.Draw(halo).ellipse(
+        (cx - halo_r, cy - halo_r, cx + halo_r, cy + halo_r),
+        fill=(cr, cg, cb, halo_alpha))
+    halo = halo.filter(ImageFilter.GaussianBlur(radius=blur_r))
+    base = Image.alpha_composite(base, halo)
+    ImageDraw.Draw(base).ellipse(
+        (cx - core_r, cy - core_r, cx + core_r, cy + core_r),
+        fill=(cr, cg, cb, 255))
+    return base.convert("RGB").resize((render_px, render_px), Image.LANCZOS)
 
 
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "cube")
@@ -89,126 +155,117 @@ LAYOUTS_PATH = os.path.join(CONFIG_DIR, "overlay-layouts.json")
 WSL_IP_CACHE = {"ip": None, "ts": 0.0}
 SIZE_PRESETS = (("Small", 140), ("Medium", 180), ("Large", 240))
 SKIN_CHOICES = ("orb", "waifu")
-THEME_NAMES = ("dark", "light")
+THEME_NAMES = ("light", "dark")
 
-# Palettes mirror bin/cube-overlay.py:54-120. Kept verbatim — when adding a
-# new skin or theme, update both files in lockstep.
-EMOJI = {
-    # No VS16 (U+FE0F) needed — we render via PIL + seguiemj.ttf, which only
-    # contains emoji glyphs, so presentation hint is redundant. Worse: VS16
-    # makes font.getbbox treat the string as 2 codepoints wide and breaks
-    # per-glyph centering (visual: glyph clipped to one side).
-    "permission": "🔐", "error": "❌", "compact": "📦", "alert": "⚠",
-    "thinking":   "⚙",  "done":  "✅", "start":   "👋", "idle":  "💤",
+# ─────────────────────────────────────────────────────────────────────────
+# Mochi palette — keep in lockstep with bin/cube-overlay.py:MOCHI_PALETTE.
+# When changing one, change both.
+# ─────────────────────────────────────────────────────────────────────────
+MOCHI_PALETTE = {
+    "waifu": {
+        "light": {
+            "card":      "#fbe9f1",
+            "text":      "#4a1834",
+            "meta":      "#7a4866",
+            "meta_dim":  "#a88898",
+            "brand":     "#a8326a",
+            "brand_dim": "#b88098",
+            "divider":   "#f2d0e0",
+            "bar_track": "#f2d0e0",
+            "bar_fill":  "#ff5ba1",
+            "usage_fg":  "#8a2862",
+            "dots": {
+                "permission": "#ff4a96", "thinking":   "#a875e0",
+                "done":       "#5fa83f", "idle":       "#bd9fb1",
+                "error":      "#ff5a72", "compact":    "#c060d8",
+                "alert":      "#ff8c4a", "start":      "#7a8cff",
+            },
+        },
+        "dark": {
+            "card":      "#2a1226",
+            "text":      "#ffe5f2",
+            "meta":      "#d99eba",
+            "meta_dim":  "#9e7088",
+            "brand":     "#ff8ec8",
+            "brand_dim": "#a86b88",
+            "divider":   "#4a1834",
+            "bar_track": "#3a0f28",
+            "bar_fill":  "#ff5ba1",
+            "usage_fg":  "#ff8ec8",
+            "dots": {
+                "permission": "#ff5ba1", "thinking":   "#c08cf0",
+                "done":       "#7fce5a", "idle":       "#a08090",
+                "error":      "#ff7088", "compact":    "#d078e8",
+                "alert":      "#ffa060", "start":      "#9aa8ff",
+            },
+        },
+    },
+    "orb": {
+        "light": {
+            "card":      "#ece3f5",
+            "text":      "#311566",
+            "meta":      "#5a4a88",
+            "meta_dim":  "#8a7eb0",
+            "brand":     "#5a3aa8",
+            "brand_dim": "#8472c0",
+            "divider":   "#dcd0ec",
+            "bar_track": "#dcd0ec",
+            "bar_fill":  "#7458d6",
+            "usage_fg":  "#4b2a96",
+            "dots": {
+                "permission": "#ff5ba1", "thinking":   "#7458d6",
+                "done":       "#5fa83f", "idle":       "#8e7fb8",
+                "error":      "#ff5a72", "compact":    "#a04ed8",
+                "alert":      "#ff8c4a", "start":      "#5870e0",
+            },
+        },
+        "dark": {
+            "card":      "#1c1535",
+            "text":      "#ebe3ff",
+            "meta":      "#a89dd0",
+            "meta_dim":  "#7a6ea0",
+            "brand":     "#b59cff",
+            "brand_dim": "#7e6cad",
+            "divider":   "#2a1d4d",
+            "bar_track": "#231642",
+            "bar_fill":  "#9b85ff",
+            "usage_fg":  "#b59cff",
+            "dots": {
+                "permission": "#ff7eb8", "thinking":   "#9b85ff",
+                "done":       "#7fce5a", "idle":       "#8e7fb8",
+                "error":      "#ff7088", "compact":    "#b890ee",
+                "alert":      "#ffa060", "start":      "#7e90ff",
+            },
+        },
+    },
 }
 
-# Tk 8.6 on Windows can't render color emoji — GDI's text path has no
-# COLR/CPAL support, so Tk falls back to Segoe UI Symbol mono glyphs that
-# look thin and washed out (especially U+2699 GEAR, U+26A0 WARNING). Workaround:
-# pre-render each emoji via PIL using seguiemj.ttf and display as a
-# PhotoImage next to the text via Label compound="left".
-#  VS16 (U+FE0F) on ⚠️/⚙️ tells PIL to use the emoji glyph table, not the
-# text-style variant.
-EMOJI_FONT_PATH = os.path.join(
-    os.environ.get("SystemRoot", "C:\\Windows"), "Fonts", "seguiemj.ttf"
-)
-
-
-def render_color_emoji(char, px_size):
-    # Canvas is slightly larger than px_size for breathing room. Each glyph is
-    # centered using its actual bbox — seguiemj.ttf glyphs have varying bearings
-    # (U+274C CROSS sits high, U+2699 GEAR more centered) so drawing at a fixed
-    # offset gives an uneven optical-center across states. font.getbbox lets us
-    # offset per-glyph so all emojis land centered in the canvas.
-    margin = 1
-    canvas = px_size + 2 * margin
-    img = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
-    try:
-        # seguiemj.ttf is a bitmap-color font (PNG glyphs at 16/24/36/48/72/96/128).
-        # ImageFont.truetype picks the closest size and scales.
-        font = ImageFont.truetype(EMOJI_FONT_PATH, px_size)
-        bbox = font.getbbox(char)
-        gw, gh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        x = (canvas - gw) // 2 - bbox[0]
-        y = (canvas - gh) // 2 - bbox[1]
-        ImageDraw.Draw(img).text((x, y), char, font=font, embedded_color=True)
-    except Exception:
-        # Font missing or render fails (very old Windows / pre-Pillow-9.2):
-        # leave the transparent image so the label still renders without emoji.
-        pass
-    return img
-SKIN_PALETTES = {
-    "orb": {
-        "dark": {
-            "chrome": {"bg": "#33241a", "fg_bright": "#e0d4c0", "fg_dim": "#807060",
-                       "usage_bg": "#433022"},
-            "states": {
-                "permission": {"bg": "#4a3a0e", "fg": "#ffd860"},
-                "error":      {"bg": "#4a1a14", "fg": "#ff9080"},
-                "compact":    {"bg": "#2e1d3c", "fg": "#c8a8e0"},
-                "alert":      {"bg": "#4a2a0c", "fg": "#ffb060"},
-                "thinking":   {"bg": "#1f2a32", "fg": "#9fb8c8"},
-                "done":       {"bg": "#1a3010", "fg": "#a0d090"},
-                "start":      {"bg": "#1f2a32", "fg": "#aac8d8"},
-                "idle":       {"bg": "#2a1d14", "fg": "#a89070"},
-            },
-        },
-        "light": {
-            "chrome": {"bg": "#f0e6d2", "fg_bright": "#2a1810", "fg_dim": "#605040",
-                       "usage_bg": "#e0d6c0"},
-            "states": {
-                "permission": {"bg": "#fae6a8", "fg": "#7a5500"},
-                "error":      {"bg": "#fad0c0", "fg": "#8a2010"},
-                "compact":    {"bg": "#e8d4f0", "fg": "#5a2080"},
-                "alert":      {"bg": "#fadcb0", "fg": "#8a4010"},
-                "thinking":   {"bg": "#d4e0e8", "fg": "#2a4055"},
-                "done":       {"bg": "#d4e8c8", "fg": "#2a5520"},
-                "start":      {"bg": "#d4e0e8", "fg": "#2a5070"},
-                "idle":       {"bg": "#ebe1d2", "fg": "#7a7060"},
-            },
-        },
-    },
-    "waifu": {
-        "dark": {
-            "chrome": {"bg": "#332034", "fg_bright": "#f0d8e0", "fg_dim": "#806878",
-                       "usage_bg": "#432b44"},
-            "states": {
-                "permission": {"bg": "#4a1f3a", "fg": "#ff9bde"},
-                "error":      {"bg": "#4a1424", "fg": "#ff8a9b"},
-                "compact":    {"bg": "#3a1438", "fg": "#e0a8d4"},
-                "alert":      {"bg": "#4a2435", "fg": "#ffadc8"},
-                "thinking":   {"bg": "#2a1d3a", "fg": "#c0a8d8"},
-                "done":       {"bg": "#2a3a1f", "fg": "#a8d098"},
-                "start":      {"bg": "#2a1d3a", "fg": "#c8b0e0"},
-                "idle":       {"bg": "#2a1a2c", "fg": "#a890a0"},
-            },
-        },
-        "light": {
-            "chrome": {"bg": "#f7e6ef", "fg_bright": "#2a1020", "fg_dim": "#605060",
-                       "usage_bg": "#ead8e2"},
-            "states": {
-                "permission": {"bg": "#fad0e8", "fg": "#7a1058"},
-                "error":      {"bg": "#fac8d0", "fg": "#8a1825"},
-                "compact":    {"bg": "#eecdef", "fg": "#5a1860"},
-                "alert":      {"bg": "#fadce5", "fg": "#8a3055"},
-                "thinking":   {"bg": "#e0d0f0", "fg": "#3a1d70"},
-                "done":       {"bg": "#d0e8c8", "fg": "#205a20"},
-                "start":      {"bg": "#e0d0f0", "fg": "#3a2080"},
-                "idle":       {"bg": "#f5e8ee", "fg": "#806068"},
-            },
-        },
-    },
+AGELESS_STATES = {"idle", "done", "start"}
+STATE_LABELS = {
+    "idle": "idle", "done": "done", "start": "start",
+    "permission": "wait", "thinking": "think",
+    "error": "error", "compact": "compact", "alert": "alert",
 }
 
 
 def palette_for(skin, theme):
-    return SKIN_PALETTES.get(skin, SKIN_PALETTES["orb"]).get(theme,
-           SKIN_PALETTES.get(skin, SKIN_PALETTES["orb"])["dark"])
+    return MOCHI_PALETTE.get(skin, MOCHI_PALETTE["orb"]).get(
+        theme, MOCHI_PALETTE.get(skin, MOCHI_PALETTE["orb"])["light"])
 
 
-BG = SKIN_PALETTES["orb"]["dark"]["chrome"]["bg"]
-FG_DIM = SKIN_PALETTES["orb"]["dark"]["chrome"]["fg_dim"]
-FG_BRIGHT = SKIN_PALETTES["orb"]["dark"]["chrome"]["fg_bright"]
+def size_metrics(win_w):
+    """Mochi proportions per window width."""
+    if win_w < 160:
+        return {"font": 10, "brand": 8,  "row_pad": 2,
+                "dot": 7,  "bar": 6, "pad": 10, "gap": 6,
+                "gif_radius": 10}
+    if win_w < 220:
+        return {"font": 12, "brand": 9,  "row_pad": 3,
+                "dot": 8,  "bar": 7, "pad": 12, "gap": 7,
+                "gif_radius": 14}
+    return         {"font": 13, "brand": 10, "row_pad": 4,
+                    "dot": 9,  "bar": 8, "pad": 14, "gap": 8,
+                    "gif_radius": 18}
 
 
 def format_age(s):
@@ -221,6 +278,9 @@ def format_age(s):
     return f"{h}h" if m == 0 else f"{h}h{m}m"
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Config files
+# ─────────────────────────────────────────────────────────────────────────
 def read_overlay_env():
     d = {}
     try:
@@ -252,15 +312,12 @@ def write_overlay_env(updates):
 
 
 def resolve_wsl_ip(force=False):
-    """Resolve the default WSL-distro's IP via `wsl.exe hostname -I`. Cached
-    forever per process; on connection failure callers can pass force=True to
-    re-resolve (covers `wsl --shutdown` mid-session — NAT-mode IPs drift)."""
+    """`wsl.exe hostname -I`. Cached forever per process; force=True
+    re-resolves (NAT-mode IPs drift on `wsl --shutdown`)."""
     if not force and WSL_IP_CACHE["ip"]:
         return WSL_IP_CACHE["ip"]
     try:
-        # CREATE_NO_WINDOW: keep the wsl.exe subprocess from popping a console
-        # when launched via pythonw.exe (.pyw double-click).
-        flags = 0x08000000 if os.name == "nt" else 0
+        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
         out = subprocess.run(["wsl.exe", "hostname", "-I"],
                              capture_output=True, text=True, timeout=3,
                              creationflags=flags)
@@ -274,10 +331,7 @@ def resolve_wsl_ip(force=False):
 
 
 def detect_layout_win():
-    """Enumerate Windows monitors via user32.EnumDisplayMonitors. Mirrors the
-    xrandr-based detect_layout() in bin/cube-overlay.py: returns
-    {fingerprint, primary:(x,y,w,h), ok}. Fingerprint format matches the Linux
-    side so overlay-layouts.json entries stay portable in principle."""
+    """user32.EnumDisplayMonitors → {fingerprint, primary:(x,y,w,h), ok}."""
     user32 = ctypes.windll.user32
 
     class MONITORINFO(ctypes.Structure):
@@ -289,8 +343,6 @@ def detect_layout_win():
         ]
 
     MONITORINFOF_PRIMARY = 0x00000001
-    # HMONITOR isn't on every wintypes vintage; fall back to HANDLE (both
-    # are pointer-sized on the ABI level).
     HMONITOR = getattr(wintypes, "HMONITOR", wintypes.HANDLE)
     MonitorEnumProc = ctypes.WINFUNCTYPE(
         ctypes.c_int,
@@ -300,7 +352,7 @@ def detect_layout_win():
     mons = []
     primary = [None]
 
-    def _cb(hmon, _hdc, _rect, _data):  # noqa: ARG001  callback signature
+    def _cb(hmon, _hdc, _rect, _data):  # noqa: ARG001
         mi = MONITORINFO()
         mi.cbSize = ctypes.sizeof(MONITORINFO)
         if not user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
@@ -360,17 +412,9 @@ def save_layout_anchor(fp, anchor_r, anchor_b):
     os.replace(tmp, LAYOUTS_PATH)
 
 
-AGELESS_STATES = {"idle", "done", "start"}
-
-
-def block_text(sess):
-    # Emoji is supplied as a PhotoImage via compound="left", not in the text.
-    cwd = sess.get("cwd") or "—"
-    if sess["state"] in AGELESS_STATES:
-        return cwd
-    return f"{cwd} · {format_age(sess['age_s'])}"
-
-
+# ─────────────────────────────────────────────────────────────────────────
+# Mock-cube fetch
+# ─────────────────────────────────────────────────────────────────────────
 def fetch_dashboard(mock):
     try:
         with urllib.request.urlopen(f"{mock}/dashboard.json", timeout=1) as r:
@@ -387,40 +431,47 @@ def fetch_gif(mock):
         return None
 
 
-def load_frames(gif_bytes, size):
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+
+def load_frames(gif_bytes, size, radius, bg_hex):
+    """GIF → rounded-rect-masked PhotoImage frames. The mask is composited
+    against the card colour so corners read as 'cut' against the matte
+    surface (not framed against the desktop)."""
     img = Image.open(io.BytesIO(gif_bytes))
     frames, durations = [], []
+    bg_rgb = _hex_to_rgb(bg_hex)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, size, size), radius=radius, fill=255)
+
     for f in ImageSequence.Iterator(img):
         rgba = f.convert("RGBA")
         if rgba.size != (size, size):
             rgba = rgba.resize((size, size), Image.LANCZOS)
-        frames.append(rgba)
+        bg = Image.new("RGBA", (size, size), bg_rgb + (255,))
+        bg.paste(rgba, (0, 0), rgba)
+        bg.putalpha(mask)
+        frames.append(bg)
         durations.append(max(20, f.info.get("duration", 100)))
     return frames, durations
 
 
-def usage_color(pct, theme="dark"):
+def usage_fill(pct, pal):
     if pct is None:
-        return FG_DIM
-    if theme == "light":
-        if pct >= 80:
-            return "#a51010"
-        if pct >= 50:
-            return "#7a5500"
-        return "#2a6020"
+        return pal["bar_track"]
     if pct >= 80:
         return "#e85555"
     if pct >= 50:
-        return "#d7c84a"
-    return "#5fd06a"
+        return "#d7a04a"
+    return pal["bar_fill"]
 
 
-def usage_label(pct):
-    if pct is None:
-        return "Usage —"
-    return f"Usage {pct}%"
-
-
+# ─────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────
 def main():
     env = read_overlay_env()
     default_port = env.get("CUBE_OVERLAY_PORT", os.environ.get("CUBE_OVERLAY_PORT", "8080"))
@@ -429,21 +480,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mock", default=default_mock,
                     help="full URL override; if omitted, derived from wsl.exe hostname -I")
-    ap.add_argument("--port", default=default_port,
-                    help="mock-cube port on WSL (default 8080)")
+    ap.add_argument("--port", default=default_port)
     ap.add_argument("--margin", type=int, default=20)
     ap.add_argument("--size", type=int,
                     default=int(env.get("CUBE_OVERLAY_SIZE", 0)),
-                    help="gif edge length; 0 = auto-fit to window width")
+                    help="gif edge length; 0 = auto-fit")
     ap.add_argument("--width", type=int,
-                    default=int(env.get("CUBE_OVERLAY_WIDTH", 0)),
-                    help="window width; 0 = derive from size + padding")
+                    default=int(env.get("CUBE_OVERLAY_WIDTH", 0)))
     ap.add_argument("--max-blocks", type=int,
                     default=int(env.get("CUBE_OVERLAY_MAX_BLOCKS", 5)))
-    ap.add_argument("--frameless", action="store_true", default=True,
-                    help="overrideredirect borderless (default on Windows)")
-    ap.add_argument("--decorated", dest="frameless", action="store_false",
-                    help="show window decorations (debug)")
+    ap.add_argument("--frameless", action="store_true", default=True)
+    ap.add_argument("--decorated", dest="frameless", action="store_false")
     args = ap.parse_args()
 
     mock_url = args.mock
@@ -455,41 +502,31 @@ def main():
             sys.exit(2)
         mock_url = f"http://{ip}:{args.port}"
 
-    win_w = args.width if args.width > 0 else max(180, (args.size or 100) + 2 * PAD)
-    if args.size <= 0:
-        args.size = win_w - 2 * PAD
+    win_w = args.width if args.width > 0 else 180
     metrics = size_metrics(win_w)
-    block_h = metrics["block_h"]
-    usage_h = metrics["usage_h"]
-    font_size = metrics["font"]
+    if args.size <= 0:
+        args.size = win_w - 2 * metrics["pad"]
 
-    # Skin is server-driven on Windows: comes from mock-cube /dashboard.json
-    # ("skin" field). We track it locally for palette + change-detection.
-    skin_name = "orb"
-    theme_name = env.get("CUBE_OVERLAY_THEME", "dark")
+    skin_name = "orb"  # server-driven, will update on first poll
+    theme_name = env.get("CUBE_OVERLAY_THEME", "light")
     if theme_name not in THEME_NAMES:
-        theme_name = "dark"
+        theme_name = "light"
     pal = palette_for(skin_name, theme_name)
-    global BG, FG_DIM, FG_BRIGHT
-    BG = pal["chrome"]["bg"]
-    FG_DIM = pal["chrome"]["fg_dim"]
-    FG_BRIGHT = pal["chrome"]["fg_bright"]
 
     root = tk.Tk()
     root.title("cube-overlay-win")
     if args.frameless:
         root.overrideredirect(True)
-    # Native Windows topmost: respected by the Win32 compositor without the
-    # WSLg focus-steal side effect. Default on for compatibility with the
-    # previous always-on-top behavior; user can disable via menu when a
-    # full-screen IDE is more important than ambient status visibility.
     topmost_default = env.get("CUBE_OVERLAY_TOPMOST", "1") == "1"
     lift_activity_default = env.get("CUBE_OVERLAY_LIFT_ON_ACTIVITY", "0") == "1"
     root.attributes("-topmost", topmost_default)
-    root.configure(bg=BG)
+    root.configure(bg=pal["card"])
 
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    init_h = PAD + block_h + usage_h + args.size + 2 * PAD
+    init_h = (metrics["pad"] + 16 +
+              4 * (metrics["font"] + 2 * metrics["row_pad"] + 2) +
+              6 + metrics["font"] + 6 + 8 + args.size + metrics["pad"])
+
     layout = detect_layout(sw, sh)
     fp = layout["fingerprint"]
     layouts = load_layouts()
@@ -497,10 +534,9 @@ def main():
 
     def _in_bounds(r, b):
         # Windows multi-monitor: secondary monitors can sit at negative
-        # offsets (mon to the left of primary). Use virtual desktop bounds.
+        # offsets. Use generous virtual-desktop bounds.
         return r > -10_000 and b > -10_000 and r < 50_000 and b < 50_000
 
-    anchor_source = "cache"
     if fp in layouts and _in_bounds(layouts[fp].get("anchor_r", 0),
                                     layouts[fp].get("anchor_b", 0)):
         anchor_right = int(layouts[fp]["anchor_r"])
@@ -508,67 +544,98 @@ def main():
     else:
         anchor_right = px + pw // 2 + win_w // 2
         anchor_bottom = py + ph // 2 + init_h // 2
-        anchor_source = "center"
         save_layout_anchor(fp, anchor_right, anchor_bottom)
 
     x = anchor_right - win_w
     y = anchor_bottom - init_h
     sys.stderr.write(
-        f"mock={mock_url}  layout={fp}  source={anchor_source}  "
-        f"primary={px},{py},{pw}x{ph}  anchor=br({anchor_right},{anchor_bottom})  "
-        f"pos=+{x}+{y}  win={win_w}x{init_h}  gif={args.size}  max_blocks={args.max_blocks}\n"
+        f"mock={mock_url}  layout={fp}  primary={px},{py},{pw}x{ph}  "
+        f"anchor=br({anchor_right},{anchor_bottom})  pos=+{x}+{y}  "
+        f"win={win_w}x{init_h}  gif={args.size}\n"
     )
     root.geometry(f"{win_w}x{init_h}+{x}+{y}")
 
-    blocks_frame = tk.Frame(root, bd=0, highlightthickness=0, bg=BG)
-    blocks_frame.pack(side="top", fill="x", padx=PAD, pady=(PAD, 0))
+    # ── Shell ───────────────────────────────────────────────────────
+    PAD = metrics["pad"]
+    shell = tk.Frame(root, bd=0, highlightthickness=0, bg=pal["card"])
+    shell.pack(fill="both", expand=True, padx=PAD, pady=PAD)
 
-    usage_bg = pal["chrome"].get("usage_bg", BG)
-    usage_lbl = tk.Label(root, text="", fg=FG_DIM, bg=usage_bg,
-                         font=("Segoe UI Semibold", font_size),
-                         anchor="w", padx=6, pady=2)
-    usage_lbl.pack(side="top", fill="x", padx=PAD, pady=(2, 0))
+    brand_frame = tk.Frame(shell, bg=pal["card"], bd=0, highlightthickness=0)
+    brand_frame.pack(fill="x", pady=(0, 6))
+    brand_lbl = tk.Label(brand_frame, text="CUBE", bg=pal["card"],
+                         fg=pal["brand"],
+                         font=("Segoe UI Semibold", metrics["brand"], "bold"),
+                         anchor="w")
+    brand_lbl.pack(side="left")
+    sess_lbl = tk.Label(brand_frame, text="0", bg=pal["card"],
+                        fg=pal["brand_dim"],
+                        font=("Segoe UI Semibold", metrics["brand"], "bold"),
+                        anchor="e")
+    sess_lbl.pack(side="right")
 
-    gif_lbl = tk.Label(root, bd=0, highlightthickness=0, bg=BG)
-    gif_lbl.pack(side="bottom", pady=(3, PAD))
+    blocks_frame = tk.Frame(shell, bg=pal["card"], bd=0, highlightthickness=0)
+    blocks_frame.pack(fill="x")
 
-    cur = {"img": None, "ts": 0, "frames": [], "durs": [], "idx": 0,
-           "visible": True, "anim_job": None,
-           "block_widgets": [],
-           "block_sig": None,
-           "last_height": init_h,
-           "anchor_right": anchor_right,
-           "anchor_bottom": anchor_bottom,
-           "fingerprint": fp,
-           "primary": layout["primary"],
-           "hidden_by_user": False,
-           "hide_winner": None,
-           "last_winner": None,
-           "theme": theme_name,
-           "skin": skin_name,
-           "mock": mock_url,
-           "consecutive_failures": 0,
-           "win_w": win_w,
-           "gif_size": args.size,
-           "metrics": metrics,
-           "last_gif_bytes": None,
-           "emoji_imgs": {}}
+    divider = tk.Frame(shell, bg=pal["divider"], height=1, bd=0,
+                       highlightthickness=0)
+    divider.pack(fill="x", pady=(5, 4))
 
-    def emoji_img_for(char, font_size):
-        # Match emoji height roughly to the text cap-height so the row stays
-        # compact and emoji+text feel optically aligned. PhotoImage instances
-        # are cached by (char, px) — Tk requires the PhotoImage object to stay
-        # alive while displayed, so the cache lives on cur and is reset by
-        # apply_size().
-        px = font_size + 4
-        key = (char, px)
-        img = cur["emoji_imgs"].get(key)
+    usage_frame = tk.Frame(shell, bg=pal["card"], bd=0, highlightthickness=0)
+    usage_frame.pack(fill="x")
+    usage_lbl = tk.Label(usage_frame, text="USE —", bg=pal["card"],
+                         fg=pal["usage_fg"],
+                         font=("Segoe UI Semibold", metrics["brand"], "bold"),
+                         anchor="w")
+    usage_lbl.pack(side="left")
+    usage_pct_lbl = tk.Label(usage_frame, text="", bg=pal["card"],
+                             fg=pal["usage_fg"],
+                             font=("Segoe UI Semibold", metrics["brand"], "bold"),
+                             anchor="e")
+    usage_pct_lbl.pack(side="right")
+    bar_canvas = tk.Canvas(shell, height=metrics["bar"], bd=0,
+                           highlightthickness=0, bg=pal["card"])
+    bar_canvas.pack(fill="x", pady=(2, 0))
+
+    gif_lbl = tk.Label(shell, bd=0, highlightthickness=0, bg=pal["card"])
+    gif_lbl.pack(side="bottom", pady=(8, 0))
+
+    cur = {
+        "img": None, "ts": 0, "frames": [], "durs": [], "idx": 0,
+        "visible": True, "anim_job": None,
+        "block_widgets": [], "block_sig": None,
+        "last_height": init_h,
+        "anchor_right": anchor_right, "anchor_bottom": anchor_bottom,
+        "fingerprint": fp, "primary": layout["primary"],
+        "hidden_by_user": False, "hide_winner": None, "last_winner": None,
+        "theme": theme_name, "skin": skin_name,
+        "mock": mock_url, "consecutive_failures": 0,
+        "win_w": win_w, "gif_size": args.size, "metrics": metrics,
+        "last_gif_bytes": None,
+        "dot_cache": {}, "dot_phase": 0, "dot_tick_job": None,
+    }
+
+    def dot_render_px():
+        # Keep slim — wider canvas eats from the cwd label column.
+        # +8 gives enough head-room for the halo's alpha fade without
+        # square-fringe leakage at the bounding box.
+        return max(14, cur["metrics"]["dot"] + 8)
+
+    def get_dot_image(color_hex, phase_idx):
+        """Cached PhotoImage for (color, phase, size, card_bg). Card bg
+        is in the key because the dot is rasterised onto an opaque card
+        background — palette swap invalidates."""
+        p = palette_for(cur["skin"], cur["theme"])
+        rpx = dot_render_px()
+        key = (color_hex, phase_idx, rpx, p["card"])
+        img = cur["dot_cache"].get(key)
         if img is None:
-            pil = render_color_emoji(char, px)
+            phase = _dot_phase(phase_idx)
+            pil = render_dot(color_hex, rpx, phase, p["card"])
             img = ImageTk.PhotoImage(pil)
-            cur["emoji_imgs"][key] = img
+            cur["dot_cache"][key] = img
         return img
 
+    # ── GIF ─────────────────────────────────────────────────────────
     def hide():
         if cur["anim_job"]:
             root.after_cancel(cur["anim_job"])
@@ -588,7 +655,11 @@ def main():
         cur["anim_job"] = root.after(cur["durs"][cur["idx"]], animate)
 
     def load(gif_bytes):
-        pil_frames, durs = load_frames(gif_bytes, cur["gif_size"])
+        p = palette_for(cur["skin"], cur["theme"])
+        pil_frames, durs = load_frames(
+            gif_bytes, cur["gif_size"],
+            radius=cur["metrics"]["gif_radius"],
+            bg_hex=p["card"])
         cur["frames"] = [ImageTk.PhotoImage(f) for f in pil_frames]
         cur["durs"] = durs
         cur["idx"] = 0
@@ -596,18 +667,13 @@ def main():
             root.after_cancel(cur["anim_job"])
             cur["anim_job"] = None
         gif_lbl.configure(image=cur["frames"][0])
-        # gif_lbl's reqheight is 1 until an image is bound. Resize once after
-        # first load so the window grows to fit the GIF instead of cropping
-        # the top/bottom edges.
-        resize_window(0)
+        resize_window()
         if len(cur["frames"]) > 1:
             cur["anim_job"] = root.after(durs[0], animate)
 
-    def resize_window(_n_blocks):
-        # Tk-true height: Windows-Tk font rendering at DPI-aware scale doesn't
-        # match the WSLg formula (PAD + n*(block_h+2) + usage_h + size + 2*PAD)
-        # well — the static estimate undercounts and the GIF gets clipped.
-        # Let Tk compute the actual required height after widget repacks.
+    def resize_window():
+        # Let Tk compute actual required height; Windows-Tk font metrics at
+        # DPI-aware scale don't match a hand-rolled formula.
         root.update_idletasks()
         h = root.winfo_reqheight()
         if h <= 1 or h == cur["last_height"]:
@@ -616,149 +682,159 @@ def main():
         new_y = cur["anchor_bottom"] - h
         root.geometry(f"{cur['win_w']}x{h}+{new_x}+{new_y}")
         cur["last_height"] = h
+        # Re-clip outline to new bounds — region is in window coords, must
+        # follow every geometry change or corners get cut off.
+        root.update_idletasks()
+        apply_round_corners(root.winfo_id(), cur["win_w"], h)
+
+    # ── Sessions ────────────────────────────────────────────────────
+    def _ensure_row(i):
+        if i < len(cur["block_widgets"]):
+            return cur["block_widgets"][i]
+        p = palette_for(cur["skin"], cur["theme"])
+        m = cur["metrics"]
+        row = tk.Frame(blocks_frame, bg=p["card"], bd=0,
+                       highlightthickness=0, cursor=cur.get("cursor", ""))
+        row.grid_columnconfigure(1, weight=1)
+        # Label (vs Canvas) so the widget sizes to the PhotoImage exactly
+        # — no canvas-bg ring around the dot raster, which was reading as
+        # a faint grey halo when Tk's chrome bg didn't match the baked
+        # card colour byte-for-byte under DPI scaling.
+        init_img = get_dot_image(p["dots"]["idle"], 0)
+        dot_lbl = tk.Label(row, image=init_img, bg=p["card"], bd=0,
+                           highlightthickness=0,
+                           cursor=cur.get("cursor", ""))
+        dot_lbl.image = init_img  # keep ref alive
+        dot_lbl.grid(row=0, column=0, padx=(0, m["gap"]))
+        cwd = tk.Label(row, text="", bg=p["card"], fg=p["text"],
+                       font=("Segoe UI Semibold", m["font"], "bold"),
+                       anchor="w", cursor=cur.get("cursor", ""))
+        cwd.grid(row=0, column=1, sticky="ew")
+        meta = tk.Label(row, text="", bg=p["card"], fg=p["meta"],
+                        font=("Segoe UI Semibold",
+                              max(8, m["font"] - 2), "bold"),
+                        anchor="e", cursor=cur.get("cursor", ""))
+        meta.grid(row=0, column=2, padx=(m["gap"], 0))
+        row.pack(fill="x", pady=(m["row_pad"], m["row_pad"]))
+        w = {"frame": row, "dot": dot_lbl,
+             "cwd": cwd, "meta": meta,
+             "dot_color": p["dots"]["idle"], "dot_state": "idle"}
+        cur["block_widgets"].append(w)
+        return w
+
+    def _shrink_rows(needed):
+        while len(cur["block_widgets"]) > needed:
+            w = cur["block_widgets"].pop()
+            w["frame"].destroy()
 
     def render_sessions(sessions):
         shown = sessions[: args.max_blocks]
         overflow = max(0, len(sessions) - args.max_blocks)
 
-        def _sig_entry(s):
+        def _sig(s):
             return (s["cwd"], s["state"]) if s["state"] in AGELESS_STATES \
                    else (s["cwd"], s["state"], s["age_s"] // 30)
-        sig = tuple(_sig_entry(s) for s in shown) + (overflow,)
+        sig = tuple(_sig(s) for s in shown) + (overflow,)
         if sig == cur["block_sig"]:
             return
         cur["block_sig"] = sig
 
-        widgets = cur["block_widgets"]
+        p = palette_for(cur["skin"], cur["theme"])
         needed = len(shown) + (1 if overflow else 0)
+        _shrink_rows(needed)
 
-        cursor = cur.get("cursor", "")
-        while len(widgets) < needed:
-            fr = tk.Frame(blocks_frame, bd=0, highlightthickness=0, bg=BG,
-                          cursor=cursor)
-            lbl = tk.Label(fr, text="", image="", compound="left",
-                           bg=BG, fg=FG_BRIGHT,
-                           font=("Segoe UI Semibold", cur["metrics"]["font"]),
-                           anchor="w", padx=6, pady=2, cursor=cursor)
-            lbl.pack(fill="x")
-            fr.pack(fill="x", pady=(0, 2))
-            widgets.append((fr, lbl))
-
-        while len(widgets) > needed:
-            fr, _ = widgets.pop()
-            fr.destroy()
-
-        states_pal = palette_for(cur["skin"], cur["theme"])["states"]
-        for i, sess in enumerate(shown):
-            vis = states_pal.get(sess["state"], states_pal["idle"])
-            _, lbl = widgets[i]
-            emoji_char = EMOJI.get(sess["state"], EMOJI["idle"])
-            emoji_img = emoji_img_for(emoji_char, cur["metrics"]["font"])
-            # Leading space gives the text breathing room next to the emoji
-            # since compound="left" doesn't add a configurable image-text gap.
-            lbl.configure(image=emoji_img, text=" " + block_text(sess),
-                          bg=vis["bg"], fg=vis["fg"])
+        for i, s in enumerate(shown):
+            w = _ensure_row(i)
+            dot_col = p["dots"].get(s["state"], p["dots"]["idle"])
+            w["dot_color"] = dot_col
+            w["dot_state"] = s["state"]
+            phase = cur["dot_phase"] if s["state"] in PULSE_STATES \
+                    else int(STATIC_PHASE * DOT_FRAMES)
+            img = get_dot_image(dot_col, phase)
+            w["dot"].configure(image=img)
+            w["dot"].image = img
+            w["cwd"].configure(text=s["cwd"] or "—", fg=p["text"])
+            ageless = s["state"] in AGELESS_STATES
+            meta_txt = STATE_LABELS.get(s["state"], "") if ageless \
+                       else format_age(s["age_s"])
+            w["meta"].configure(text=meta_txt,
+                                fg=p["meta_dim"] if ageless else p["meta"])
         if overflow:
-            _, lbl = widgets[len(shown)]
-            lbl.configure(image="", text=f"  +{overflow} more",
-                          bg=BG, fg=FG_DIM)
+            w = _ensure_row(len(shown))
+            w["dot_color"] = p["meta_dim"]
+            w["dot_state"] = "idle"  # don't pulse the overflow marker
+            img = get_dot_image(p["meta_dim"],
+                                int(STATIC_PHASE * DOT_FRAMES))
+            w["dot"].configure(image=img)
+            w["dot"].image = img
+            w["cwd"].configure(text=f"+{overflow} more", fg=p["meta"])
+            w["meta"].configure(text="")
 
-        resize_window(needed)
+        resize_window()
+
+    def render_usage(pct):
+        p = palette_for(cur["skin"], cur["theme"])
+        usage_lbl.configure(text="USE" if pct is not None else "USE —",
+                            fg=p["usage_fg"])
+        usage_pct_lbl.configure(
+            text=f"{pct}%" if pct is not None else "",
+            fg=p["usage_fg"])
+        bar_canvas.delete("all")
+        w = bar_canvas.winfo_width()
+        if w <= 1:
+            bar_canvas.update_idletasks()
+            w = bar_canvas.winfo_width()
+        h = cur["metrics"]["bar"]
+        bar_canvas.create_rectangle(0, 0, w, h,
+                                    fill=p["bar_track"], outline="")
+        if pct is not None and pct > 0 and w > 1:
+            fill_w = max(2, int(w * pct / 100))
+            bar_canvas.create_rectangle(0, 0, fill_w, h,
+                                        fill=usage_fill(pct, p), outline="")
 
     def update_dashboard(d):
         render_sessions(d.get("sessions") or [])
-        pct = d.get("usage_5h_pct")
-        usage_lbl.configure(text=usage_label(pct),
-                            fg=usage_color(pct, cur["theme"]))
+        sess_lbl.configure(text=str(len(d.get("sessions") or [])))
+        render_usage(d.get("usage_5h_pct"))
 
-    def poll():
-        s = fetch_dashboard(cur["mock"])
-        if s is None:
-            cur["consecutive_failures"] += 1
-            # After 3 consecutive misses, the WSL IP may have drifted
-            # (NAT-mode reassigns on `wsl --shutdown`). Re-resolve and
-            # rebuild the mock URL.
-            if cur["consecutive_failures"] == 3 and not args.mock:
-                new_ip = resolve_wsl_ip(force=True)
-                if new_ip:
-                    new_url = f"http://{new_ip}:{args.port}"
-                    if new_url != cur["mock"]:
-                        sys.stderr.write(f"wsl-ip drift: {cur['mock']} -> {new_url}\n")
-                        cur["mock"] = new_url
-            root.after(POLL_MS * 4, poll)
-            return
-        cur["consecutive_failures"] = 0
-        # Skin from mock (server-driven). cube.sh in WSL is the source of
-        # truth; this overlay observes it.
-        live_skin = s.get("skin") or "orb"
-        if live_skin != cur["skin"]:
-            apply_palette(live_skin, cur["theme"])
-        update_dashboard(s)
-        if (s.get("img"), s.get("ts")) != (cur["img"], cur["ts"]):
-            data = fetch_gif(cur["mock"])
-            if data:
-                cur["last_gif_bytes"] = data
-                load(data)
-                cur["img"] = s.get("img")
-                cur["ts"] = s.get("ts")
-        winner = (s.get("state"), s.get("img"))
-        prev_winner = cur["last_winner"]
-        cur["last_winner"] = winner
-        # Auto-lift when a new non-idle state shows up. The prev_winner None
-        # guard skips the first poll cycle so the overlay doesn't slam to
-        # front on every startup. Idle is excluded because revert-to-idle
-        # carries no attention value (hook finished, nothing happened).
-        if (lift_activity_var.get()
-                and prev_winner is not None
-                and prev_winner != winner
-                and winner[0] != "idle"):
-            bring_to_front()
-        if cur["hidden_by_user"]:
-            if winner != cur["hide_winner"]:
-                cur["hidden_by_user"] = False
-                show()
-        else:
-            show()
-        root.after(POLL_MS, poll)
-
-    def user_hide():
-        cur["hidden_by_user"] = True
-        cur["hide_winner"] = cur["last_winner"]
-        hide()
-
-    def menu_kwargs():
-        pal = palette_for(cur["skin"], cur["theme"])
-        return dict(
-            bg=pal["chrome"]["bg"],
-            fg=pal["chrome"]["fg_bright"],
-            activebackground=pal["states"]["thinking"]["bg"],
-            activeforeground=pal["states"]["thinking"]["fg"],
-            bd=0,
-        )
-
-    def apply_palette(skin, theme):
-        global BG, FG_DIM, FG_BRIGHT
-        pal = palette_for(skin, theme)
-        BG = pal["chrome"]["bg"]
-        FG_DIM = pal["chrome"]["fg_dim"]
-        FG_BRIGHT = pal["chrome"]["fg_bright"]
-        usage_bg = pal["chrome"].get("usage_bg", BG)
-        root.configure(bg=BG)
-        blocks_frame.configure(bg=BG)
-        usage_lbl.configure(bg=usage_bg)
-        gif_lbl.configure(bg=BG)
-        cur["skin"] = skin
-        cur["theme"] = theme
-        cur["block_sig"] = None
+    # ── Palette switching ───────────────────────────────────────────
+    def repaint_chrome():
+        p = palette_for(cur["skin"], cur["theme"])
+        root.configure(bg=p["card"])
+        shell.configure(bg=p["card"])
+        brand_frame.configure(bg=p["card"])
+        brand_lbl.configure(bg=p["card"], fg=p["brand"])
+        sess_lbl.configure(bg=p["card"], fg=p["brand_dim"])
+        blocks_frame.configure(bg=p["card"])
+        divider.configure(bg=p["divider"])
+        usage_frame.configure(bg=p["card"])
+        usage_lbl.configure(bg=p["card"], fg=p["usage_fg"])
+        usage_pct_lbl.configure(bg=p["card"], fg=p["usage_fg"])
+        bar_canvas.configure(bg=p["card"])
+        gif_lbl.configure(bg=p["card"])
+        for w in cur["block_widgets"]:
+            w["frame"].configure(bg=p["card"])
+            w["dot"].configure(bg=p["card"])
+            w["cwd"].configure(bg=p["card"], fg=p["text"])
+            w["meta"].configure(bg=p["card"], fg=p["meta"])
         for m in cur.get("menus") or ():
             try:
-                m.configure(**menu_kwargs())
+                m.configure(bg=p["card"], fg=p["text"],
+                            activebackground=p["divider"],
+                            activeforeground=p["text"])
             except tk.TclError:
                 pass
-        # Sync skin radiobutton with server-driven changes (CLI cube.sh skin
-        # …, or another overlay's menu click). NameError-guarded because
-        # apply_palette can fire from poll() before skin_var exists during
-        # very early init.
+
+    def apply_palette(skin, theme):
+        cur["skin"] = skin
+        cur["theme"] = theme
+        repaint_chrome()
+        cur["block_sig"] = None
+        cur["dot_cache"].clear()  # halo is composited against card bg
+        # Re-rasterize GIF: the alpha mask is composited against the card
+        # colour, which just changed.
+        if cur.get("last_gif_bytes"):
+            load(cur["last_gif_bytes"])
         try:
             skin_var.set(skin)
         except NameError:
@@ -770,21 +846,14 @@ def main():
 
     def set_skin(name):
         # Route through mock-cube's /set?skin=NAME — mock-cube proxies to
-        # cube.sh skin + redisplay in WSL. The redisplay push updates
-        # STATE.img server-side; the next poll cycle picks up the new skin
-        # and re-applies the palette automatically.
+        # cube.sh skin + redisplay in WSL. Next poll picks up the new skin
+        # and re-applies the palette.
         try:
             urllib.request.urlopen(f"{cur['mock']}/set?skin={name}", timeout=2).read()
         except Exception as e:
             sys.stderr.write(f"set_skin({name}) failed: {e}\n")
 
     def restart_overlay():
-        # pythonw.exe (for .pyw) doesn't open a console; DETACHED_PROCESS
-        # ensures the new instance survives the current's destroy().
-        # cwd= explicit non-UNC path: when launched via UNC argv[0]
-        # (\\wsl.localhost\Ubuntu\...) the inherited cwd can be UNC, which
-        # CreateProcess refuses (ERROR_DIRECTORY) — the spawn then fails
-        # silently because pythonw has no stderr.
         flags = 0x00000008 if os.name == "nt" else 0  # DETACHED_PROCESS
         safe_cwd = os.environ.get("USERPROFILE") or os.path.expanduser("~")
         try:
@@ -802,34 +871,55 @@ def main():
         restart_overlay()
 
     def apply_size(w):
-        # Live size change — no restart_overlay() round trip. The Linux
-        # variant restart-roundtrips fine via execv, but Windows subprocess
-        # re-spawn from a UNC argv[0] + pythonw.exe + DETACHED_PROCESS combo
-        # can silently fail on multi-monitor setups (observed: 3-monitor host
-        # crashed without bringing the new instance up).
+        # Live size change — no restart roundtrip. (Windows-Tk subprocess
+        # re-spawn via UNC argv[0] + pythonw + DETACHED_PROCESS has been
+        # observed to silently fail on multi-monitor.)
         cur["win_w"] = w
-        cur["gif_size"] = w - 2 * PAD
+        cur["gif_size"] = w - 2 * cur["metrics"]["pad"]
         cur["metrics"] = size_metrics(w)
-        new_font = ("Segoe UI Semibold", cur["metrics"]["font"])
-        usage_lbl.configure(font=new_font)
-        for _fr, lbl in cur["block_widgets"]:
-            try:
-                lbl.configure(font=new_font)
-            except tk.TclError:
-                pass
+        cur["gif_size"] = w - 2 * cur["metrics"]["pad"]
+        new_brand = ("Segoe UI Semibold", cur["metrics"]["brand"], "bold")
+        new_row = ("Segoe UI Semibold", cur["metrics"]["font"], "bold")
+        new_meta = ("Segoe UI Semibold",
+                    max(8, cur["metrics"]["font"] - 2), "bold")
+        brand_lbl.configure(font=new_brand)
+        sess_lbl.configure(font=new_brand)
+        usage_lbl.configure(font=new_brand)
+        usage_pct_lbl.configure(font=new_brand)
+        bar_canvas.configure(height=cur["metrics"]["bar"])
+        for ww in cur["block_widgets"]:
+            ww["cwd"].configure(font=new_row)
+            ww["meta"].configure(font=new_meta)
         cur["block_sig"] = None
-        cur["last_height"] = 0  # force resize_window to re-apply geometry
-        cur["emoji_imgs"] = {}  # re-render emoji at new font size
+        cur["last_height"] = 0
+        cur["dot_cache"].clear()  # dot_render_px tied to metrics["dot"]
+        # Re-create rows so canvas widths match new dot_render_px.
+        _shrink_rows(0)
         if cur.get("last_gif_bytes"):
             load(cur["last_gif_bytes"])
         else:
-            cur["ts"] = -1  # force re-fetch on next poll
-        resize_window(0)
+            cur["ts"] = -1
+        resize_window()
 
     def set_size(w):
-        write_overlay_env({"CUBE_OVERLAY_WIDTH": str(w), "CUBE_OVERLAY_SIZE": None})
+        write_overlay_env({"CUBE_OVERLAY_WIDTH": str(w),
+                           "CUBE_OVERLAY_SIZE": None})
         apply_size(w)
 
+    def user_hide():
+        cur["hidden_by_user"] = True
+        cur["hide_winner"] = cur["last_winner"]
+        hide()
+
+    def bring_to_front():
+        # Win10/11 foreground-lock blocks SetForegroundWindow from background
+        # processes; flicker -topmost to lift above current z-order without
+        # the focus-steal side effect.
+        root.attributes("-topmost", True)
+        root.lift()
+        root.after(50, lambda: root.attributes("-topmost", topmost_var.get()))
+
+    # ── Menu ────────────────────────────────────────────────────────
     theme_var = tk.StringVar(value=theme_name)
     skin_var = tk.StringVar(value=cur["skin"])
     size_var = tk.IntVar(value=win_w)
@@ -840,20 +930,23 @@ def main():
     def apply_cursor():
         c = "" if lock_var.get() else "fleur"
         cur["cursor"] = c
-        for w in (root, blocks_frame, usage_lbl, gif_lbl):
+        for wdg in (root, shell, brand_frame, brand_lbl, sess_lbl,
+                    blocks_frame, divider, usage_frame, usage_lbl,
+                    usage_pct_lbl, bar_canvas, gif_lbl):
             try:
-                w.configure(cursor=c)
+                wdg.configure(cursor=c)
             except tk.TclError:
                 pass
-        for fr, lbl in cur["block_widgets"]:
-            try:
-                fr.configure(cursor=c)
-                lbl.configure(cursor=c)
-            except tk.TclError:
-                pass
+        for w in cur["block_widgets"]:
+            for k in ("frame", "dot", "cwd", "meta"):
+                try:
+                    w[k].configure(cursor=c)
+                except tk.TclError:
+                    pass
 
     def toggle_lock():
-        write_overlay_env({"CUBE_OVERLAY_POSITION_LOCKED": "1" if lock_var.get() else "0"})
+        write_overlay_env({"CUBE_OVERLAY_POSITION_LOCKED":
+                           "1" if lock_var.get() else "0"})
         apply_cursor()
 
     def toggle_topmost():
@@ -865,21 +958,13 @@ def main():
         write_overlay_env({"CUBE_OVERLAY_LIFT_ON_ACTIVITY":
                            "1" if lift_activity_var.get() else "0"})
 
-    def bring_to_front():
-        # Flicker -topmost on->off to lift the window above the current Win32
-        # z-order without leaving it always-on-top. SetForegroundWindow would
-        # be the "proper" call but Win10/11 foreground-lock rules block it
-        # from a background process — the -topmost toggle bypasses that and
-        # also avoids the focus-steal side effect (Tk's lift() alone does
-        # nothing if the target sits behind a topmost window).
-        root.attributes("-topmost", True)
-        root.lift()
-        root.after(50, lambda: root.attributes("-topmost", topmost_var.get()))
-
-    mk = menu_kwargs()
+    p_now = palette_for(skin_name, theme_name)
+    mk = dict(bg=p_now["card"], fg=p_now["text"],
+              activebackground=p_now["divider"],
+              activeforeground=p_now["text"], bd=0)
     menu = tk.Menu(root, tearoff=0, **mk)
     theme_m = tk.Menu(menu, tearoff=0, **mk)
-    for t in ("dark", "light"):
+    for t in THEME_NAMES:
         theme_m.add_radiobutton(label=t.capitalize(), variable=theme_var,
                                 value=t, command=lambda n=t: set_theme(n))
     menu.add_cascade(label="Theme", menu=theme_m)
@@ -889,7 +974,8 @@ def main():
                                command=lambda n=sk: set_skin(n))
     menu.add_cascade(label="Skin", menu=skin_m)
     pos_m = tk.Menu(menu, tearoff=0, **mk)
-    pos_m.add_checkbutton(label="Locked", variable=lock_var, command=toggle_lock)
+    pos_m.add_checkbutton(label="Locked", variable=lock_var,
+                          command=toggle_lock)
     pos_m.add_command(label="Reset", command=reset_position)
     menu.add_cascade(label="Position", menu=pos_m)
     size_m = tk.Menu(menu, tearoff=0, **mk)
@@ -916,6 +1002,7 @@ def main():
         finally:
             menu.grab_release()
 
+    # ── Drag ────────────────────────────────────────────────────────
     drag = {"active": False, "off_x": 0, "off_y": 0}
 
     def drag_start(ev):
@@ -933,18 +1020,16 @@ def main():
     def drag_motion(ev):
         if not drag["active"]:
             return
-        new_x = ev.x_root - drag["off_x"]
-        new_y = ev.y_root - drag["off_y"]
-        root.geometry(f"{cur['win_w']}x{cur['last_height']}+{new_x}+{new_y}")
+        nx = ev.x_root - drag["off_x"]
+        ny = ev.y_root - drag["off_y"]
+        root.geometry(f"{cur['win_w']}x{cur['last_height']}+{nx}+{ny}")
 
     def drag_end(_ev):
         if not drag["active"]:
             return
         drag["active"] = False
-        new_x = root.winfo_rootx()
-        new_y = root.winfo_rooty()
-        cur["anchor_right"] = new_x + cur["win_w"]
-        cur["anchor_bottom"] = new_y + cur["last_height"]
+        cur["anchor_right"] = root.winfo_rootx() + cur["win_w"]
+        cur["anchor_bottom"] = root.winfo_rooty() + cur["last_height"]
         try:
             save_layout_anchor(cur["fingerprint"],
                                cur["anchor_right"], cur["anchor_bottom"])
@@ -952,18 +1037,80 @@ def main():
             pass
 
     apply_cursor()
-
     root.bind_all("<Button-1>", drag_start)
     root.bind_all("<B1-Motion>", drag_motion)
     root.bind_all("<ButtonRelease-1>", drag_end)
     root.bind_all("<Button-3>", show_menu)
     root.bind("<Escape>", lambda _e: root.destroy())
 
-    # One-shot height refine after Tk lays out the empty widgets — covers the
-    # gap before the first GIF arrives so the window doesn't open with a
-    # visibly cropped GIF row.
-    root.after_idle(lambda: resize_window(0))
+    # ── Dot pulse tick ──────────────────────────────────────────────
+    def tick_dots():
+        cur["dot_phase"] = (cur["dot_phase"] + 1) % DOT_FRAMES
+        static_idx = int(STATIC_PHASE * DOT_FRAMES)
+        for w in cur["block_widgets"]:
+            state = w.get("dot_state", "idle")
+            color = w.get("dot_color")
+            if not color:
+                continue
+            # Static states don't need a redraw every tick; their image
+            # never changes. Skip the configure call to save CPU.
+            if state not in PULSE_STATES:
+                continue
+            try:
+                img = get_dot_image(color, cur["dot_phase"])
+                w["dot"].configure(image=img)
+                w["dot"].image = img
+            except tk.TclError:
+                pass
+        cur["dot_tick_job"] = root.after(DOT_TICK_MS, tick_dots)
+
+    # ── Poll loop ───────────────────────────────────────────────────
+    def poll():
+        s = fetch_dashboard(cur["mock"])
+        if s is None:
+            cur["consecutive_failures"] += 1
+            # 3 misses → re-resolve WSL IP (NAT drift after `wsl --shutdown`).
+            if cur["consecutive_failures"] == 3 and not args.mock:
+                new_ip = resolve_wsl_ip(force=True)
+                if new_ip:
+                    new_url = f"http://{new_ip}:{args.port}"
+                    if new_url != cur["mock"]:
+                        sys.stderr.write(f"wsl-ip drift: {cur['mock']} -> {new_url}\n")
+                        cur["mock"] = new_url
+            root.after(POLL_MS * 4, poll)
+            return
+        cur["consecutive_failures"] = 0
+        # Skin from mock — cube.sh in WSL is source of truth.
+        live_skin = s.get("skin") or "orb"
+        if live_skin != cur["skin"]:
+            apply_palette(live_skin, cur["theme"])
+        update_dashboard(s)
+        if (s.get("img"), s.get("ts")) != (cur["img"], cur["ts"]):
+            data = fetch_gif(cur["mock"])
+            if data:
+                cur["last_gif_bytes"] = data
+                load(data)
+                cur["img"] = s.get("img")
+                cur["ts"] = s.get("ts")
+        winner = (s.get("state"), s.get("img"))
+        prev_winner = cur["last_winner"]
+        cur["last_winner"] = winner
+        if (lift_activity_var.get()
+                and prev_winner is not None
+                and prev_winner != winner
+                and winner[0] != "idle"):
+            bring_to_front()
+        if cur["hidden_by_user"]:
+            if winner != cur["hide_winner"]:
+                cur["hidden_by_user"] = False
+                show()
+        else:
+            show()
+        root.after(POLL_MS, poll)
+
+    root.after_idle(lambda: resize_window())
     root.after(100, poll)
+    root.after(DOT_TICK_MS, tick_dots)
     root.mainloop()
 
 
