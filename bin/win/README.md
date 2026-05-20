@@ -63,19 +63,42 @@ Oder Datei in einen Windows-Pfad kopieren und per Doppelklick starten
 ### 5. Autostart (optional)
 
 Per Startup-Folder-Shortcut: `Win+R` → `shell:startup` öffnet
-`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`. Da rein eine
-`.cmd`-Datei legen (z.B. `cube-overlay.cmd`):
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`. Repo-Datei
+`bin/win/cube-overlay-win.cmd` dort hin kopieren (oder via Symlink/Verknüpfung).
+
+Inhalt der `cube-overlay-win.cmd`:
 
 ```cmd
 @echo off
 wsl.exe --exec true >nul 2>&1
-start "" pythonw.exe "\\wsl.localhost\Ubuntu\home\<user>\projects\cube\bin\win\cube-overlay-win.pyw"
+for /f "delims=" %%P in ('py -c "import sys,os; print(os.path.join(os.path.dirname(sys.executable),'pythonw.exe'))"') do set PYW=%%P
+if "%CUBE_OVERLAY_UNC%"=="" set CUBE_OVERLAY_UNC=\\wsl.localhost\Ubuntu\home\%USERNAME%\projects\cube\bin\win\cube-overlay-win.pyw
+start "" "%PYW%" "%CUBE_OVERLAY_UNC%"
 ```
 
 - `wsl --exec true` bootet die Distro falls noch nicht hochgekommen — UNC-Zugriff
   auf `\\wsl.localhost\` braucht eine laufende WSL.
-- `start ""` löst `pythonw.exe` vom cmd-Prozess ab, damit das Konsolen-Fenster
-  sofort schließt und das Overlay weiterläuft.
+- `for /f` löst `pythonw.exe` dynamisch via py-Launcher auf — überlebt Python
+  Minor-Upgrades, funktioniert mit Store / python.org / Python Install Manager.
+- `pythonw.exe` (statt `py`) direkt: py-Launcher ist Console-Subsystem und
+  **bleibt am pythonw-Child hängen** bis dieses exit — Konsolen-Fenster blieben
+  während der gesamten Overlay-Laufzeit offen (unsichtbar in Taskleiste).
+  `pythonw.exe` ist GUI-Subsystem, hat keine Konsole, `start ""` detached
+  sauber.
+- `%USERNAME%` für UNC: matched Windows-User auf Linux-User. Wenn die User
+  abweichen, `CUBE_OVERLAY_UNC` als System-Env-Var auf den vollen UNC-Pfad
+  setzen (`Erweiterte Systemeinstellungen` → `Umgebungsvariablen`).
+
+**PowerShell-Variante** (`cube-overlay.ps1`, falls `.cmd` nicht gewollt):
+
+```powershell
+wsl.exe --exec true *> $null
+Start-Process py -ArgumentList '\\wsl.localhost\Ubuntu\home\<user>\projects\cube\bin\win\cube-overlay-win.pyw'
+```
+
+`*> $null` = PowerShell-Äquivalent zu `>nul 2>&1` (alle Streams verwerfen).
+`.ps1` im Startup-Folder braucht u.U. `ExecutionPolicy`-Anpassung; Verknüpfung
+auf `powershell.exe -ExecutionPolicy Bypass -File <pfad>.ps1` umgeht das.
 
 Voraussetzung: `mock-cube.service` muss nach Login automatisch hochkommen:
 
@@ -152,6 +175,13 @@ Sollte nicht passieren — `SetProcessDpiAwareness(2)` läuft beim Start. Falls
 doch: Tk-Version prüfen (`python -c "import tkinter; print(tkinter.TkVersion)"`),
 8.6+ erforderlich.
 
-**`pythonw.exe` nicht im Startup**:  
-`.pyw`-Endung erforderlich, sonst öffnet `python.exe` zusätzlich ein
-Konsolen-Fenster. Doppelklick auf `.pyw` ruft `pythonw.exe` auf.
+**`where pythonw.exe` liefert nichts**:  
+Bei Store-/py-Launcher-Install ist `pythonw.exe` häufig nicht im System-PATH.
+`where py` testen — der py-Launcher ist zuverlässig drin und löst `.pyw`
+selbst auf `pythonw.exe` auf. `.cmd` auf `start "" py ...` statt
+`start "" pythonw.exe ...` umstellen.
+
+**`py` selbst fehlt**:  
+Python für Windows nachinstallieren — `winget install Python.Python.3.12` oder
+python.org-Installer mit **Add Python to PATH** + **py launcher** aktiviert.
+Danach neue PowerShell-Session öffnen (PATH wird beim Start gelesen).

@@ -32,8 +32,30 @@ import os
 import subprocess
 import sys
 import tkinter as tk
+import traceback
 import urllib.request
 from ctypes import wintypes
+
+# pythonw.exe (used for .pyw startup) has no console — sys.stderr is wired to
+# NUL, so anything we'd normally print for diagnostics gets silently lost,
+# and an uncaught exception kills the process invisibly. Redirect stderr to a
+# log file early so silent startup crashes are debuggable.
+if os.name == "nt":
+    try:
+        _log_path = os.path.join(
+            os.environ.get("TEMP", os.path.expanduser("~")),
+            "cube-overlay-win.log")
+        sys.stderr = open(_log_path, "a", buffering=1, encoding="utf-8",
+                          errors="replace")
+        sys.stderr.write(f"\n--- start pid={os.getpid()} exe={sys.executable} ---\n")
+        sys.stderr.write(f"argv={sys.argv}\n")
+
+        def _excepthook(typ, val, tb):
+            traceback.print_exception(typ, val, tb, file=sys.stderr)
+            sys.stderr.flush()
+        sys.excepthook = _excepthook
+    except Exception:
+        pass
 
 from PIL import Image, ImageSequence, ImageTk
 
@@ -481,7 +503,11 @@ def main():
            "theme": theme_name,
            "skin": skin_name,
            "mock": mock_url,
-           "consecutive_failures": 0}
+           "consecutive_failures": 0,
+           "win_w": win_w,
+           "gif_size": args.size,
+           "metrics": metrics,
+           "last_gif_bytes": None}
 
     def hide():
         if cur["anim_job"]:
@@ -502,7 +528,7 @@ def main():
         cur["anim_job"] = root.after(cur["durs"][cur["idx"]], animate)
 
     def load(gif_bytes):
-        pil_frames, durs = load_frames(gif_bytes, args.size)
+        pil_frames, durs = load_frames(gif_bytes, cur["gif_size"])
         cur["frames"] = [ImageTk.PhotoImage(f) for f in pil_frames]
         cur["durs"] = durs
         cur["idx"] = 0
@@ -526,9 +552,9 @@ def main():
         h = root.winfo_reqheight()
         if h <= 1 or h == cur["last_height"]:
             return
-        new_x = cur["anchor_right"] - win_w
+        new_x = cur["anchor_right"] - cur["win_w"]
         new_y = cur["anchor_bottom"] - h
-        root.geometry(f"{win_w}x{h}+{new_x}+{new_y}")
+        root.geometry(f"{cur['win_w']}x{h}+{new_x}+{new_y}")
         cur["last_height"] = h
 
     def render_sessions(sessions):
@@ -551,8 +577,8 @@ def main():
             fr = tk.Frame(blocks_frame, bd=0, highlightthickness=0, bg=BG,
                           cursor=cursor)
             lbl = tk.Label(fr, text="", bg=BG, fg=FG_BRIGHT,
-                           font=("TkDefaultFont", font_size, "bold"), anchor="w",
-                           padx=6, pady=2, cursor=cursor)
+                           font=("TkDefaultFont", cur["metrics"]["font"], "bold"),
+                           anchor="w", padx=6, pady=2, cursor=cursor)
             lbl.pack(fill="x")
             fr.pack(fill="x", pady=(0, 2))
             widgets.append((fr, lbl))
@@ -604,6 +630,7 @@ def main():
         if (s.get("img"), s.get("ts")) != (cur["img"], cur["ts"]):
             data = fetch_gif(cur["mock"])
             if data:
+                cur["last_gif_bytes"] = data
                 load(data)
                 cur["img"] = s.get("img")
                 cur["ts"] = s.get("ts")
@@ -677,10 +704,16 @@ def main():
     def restart_overlay():
         # pythonw.exe (for .pyw) doesn't open a console; DETACHED_PROCESS
         # ensures the new instance survives the current's destroy().
+        # cwd= explicit non-UNC path: when launched via UNC argv[0]
+        # (\\wsl.localhost\Ubuntu\...) the inherited cwd can be UNC, which
+        # CreateProcess refuses (ERROR_DIRECTORY) — the spawn then fails
+        # silently because pythonw has no stderr.
         flags = 0x00000008 if os.name == "nt" else 0  # DETACHED_PROCESS
+        safe_cwd = os.environ.get("USERPROFILE") or os.path.expanduser("~")
         try:
             subprocess.Popen([sys.executable] + sys.argv,
-                             creationflags=flags, close_fds=True)
+                             creationflags=flags, close_fds=True,
+                             cwd=safe_cwd)
         except Exception as e:
             sys.stderr.write(f"restart failed: {e}\n")
             return
@@ -691,9 +724,33 @@ def main():
         save_layout_anchor(cur["fingerprint"], px + pw, py + ph)
         restart_overlay()
 
+    def apply_size(w):
+        # Live size change — no restart_overlay() round trip. The Linux
+        # variant restart-roundtrips fine via execv, but Windows subprocess
+        # re-spawn from a UNC argv[0] + pythonw.exe + DETACHED_PROCESS combo
+        # can silently fail on multi-monitor setups (observed: 3-monitor host
+        # crashed without bringing the new instance up).
+        cur["win_w"] = w
+        cur["gif_size"] = w - 2 * PAD
+        cur["metrics"] = size_metrics(w)
+        new_font = ("TkDefaultFont", cur["metrics"]["font"], "bold")
+        usage_lbl.configure(font=new_font)
+        for _fr, lbl in cur["block_widgets"]:
+            try:
+                lbl.configure(font=new_font)
+            except tk.TclError:
+                pass
+        cur["block_sig"] = None
+        cur["last_height"] = 0  # force resize_window to re-apply geometry
+        if cur.get("last_gif_bytes"):
+            load(cur["last_gif_bytes"])
+        else:
+            cur["ts"] = -1  # force re-fetch on next poll
+        resize_window(0)
+
     def set_size(w):
         write_overlay_env({"CUBE_OVERLAY_WIDTH": str(w), "CUBE_OVERLAY_SIZE": None})
-        restart_overlay()
+        apply_size(w)
 
     theme_var = tk.StringVar(value=theme_name)
     skin_var = tk.StringVar(value=cur["skin"])
@@ -770,7 +827,7 @@ def main():
             return
         new_x = ev.x_root - drag["off_x"]
         new_y = ev.y_root - drag["off_y"]
-        root.geometry(f"{win_w}x{cur['last_height']}+{new_x}+{new_y}")
+        root.geometry(f"{cur['win_w']}x{cur['last_height']}+{new_x}+{new_y}")
 
     def drag_end(_ev):
         if not drag["active"]:
@@ -778,7 +835,7 @@ def main():
         drag["active"] = False
         new_x = root.winfo_rootx()
         new_y = root.winfo_rooty()
-        cur["anchor_right"] = new_x + win_w
+        cur["anchor_right"] = new_x + cur["win_w"]
         cur["anchor_bottom"] = new_y + cur["last_height"]
         try:
             save_layout_anchor(cur["fingerprint"],
