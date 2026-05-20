@@ -37,6 +37,7 @@ TIMEOUT="${CUBE_TIMEOUT:-2}"
 SKIN_FILE="${CUBE_SKIN_FILE:-$HOME/.claude/.cube-skin}"
 SESSIONS_FILE="${CUBE_SESSIONS_FILE:-/tmp/.cube-sessions-$UID.json}"
 SESSION_TTL="${CUBE_SESSION_TTL:-3600}"
+IDLE_TTL="${CUBE_IDLE_TTL:-600}"
 ALERT_REVERT="${CUBE_ALERT_REVERT:-5}"
 PERMISSION_REVERT="${CUBE_PERMISSION_REVERT:-$ALERT_REVERT}"
 ERROR_REVERT="${CUBE_ERROR_REVERT:-$ALERT_REVERT}"
@@ -122,19 +123,29 @@ mutate() {
   mkdir -p "$(dirname "$SESSIONS_FILE")" 2>/dev/null || true
   exec 9>"$SESSIONS_FILE.lock"
   flock -x 9 2>/dev/null || true
-  python3 - "$SESSIONS_FILE" "$op" "$sid" "$new_state" "$SESSION_TTL" "$RECAP_WINDOW" "$cwd" <<'PY'
+  python3 - "$SESSIONS_FILE" "$op" "$sid" "$new_state" "$SESSION_TTL" "$RECAP_WINDOW" "$cwd" "$IDLE_TTL" <<'PY'
 import json, os, sys, tempfile, time
 path, op, sid, new_state = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 ttl, recap_window = int(sys.argv[5]), int(sys.argv[6])
 cwd = sys.argv[7] if len(sys.argv) > 7 else ""
+idle_ttl = int(sys.argv[8]) if len(sys.argv) > 8 else 0
 try:
     with open(path) as f:
         data = json.load(f)
 except (OSError, ValueError):
     data = {"sessions": {}, "displayed": "idle", "displayed_cwd": "", "displayed_ts": 0}
 now = time.time()
-data["sessions"] = {k: v for k, v in (data.get("sessions") or {}).items()
-                    if now - v.get("ts", 0) < ttl}
+def _alive(v):
+    age = now - v.get("ts", 0)
+    if age >= ttl:
+        return False
+    # Crashed Claude instances never fire SessionEnd, so they linger as
+    # idle until SESSION_TTL. The idle-specific TTL catches them faster
+    # without affecting active state-changes (those bump ts).
+    if v.get("state") == "idle" and idle_ttl > 0 and age >= idle_ttl:
+        return False
+    return True
+data["sessions"] = {k: v for k, v in (data.get("sessions") or {}).items() if _alive(v)}
 seq_out = "-"
 if op == "update":
     prev = data["sessions"].get(sid, {})

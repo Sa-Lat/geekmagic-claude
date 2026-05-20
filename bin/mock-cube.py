@@ -69,6 +69,7 @@ def _read_displayed_cwd():
 SESSION_PRIO = {"permission": 5, "error": 4, "compact": 3, "done": 2.5,
                 "thinking": 2, "alert": 1, "start": 0.5, "idle": 0}
 SESSION_TTL = int(os.environ.get("CUBE_SESSION_TTL", "3600"))
+IDLE_TTL = int(os.environ.get("CUBE_IDLE_TTL", "600"))
 
 
 def _read_sessions_list():
@@ -83,14 +84,20 @@ def _read_sessions_list():
     out = []
     for entry in (d.get("sessions") or {}).values():
         ts = entry.get("ts", 0)
-        if now - ts >= SESSION_TTL:
+        age = now - ts
+        if age >= SESSION_TTL:
+            continue
+        # Idle-specific prune: crashed Claude sessions never fire SessionEnd
+        # and would linger an hour. CUBE_IDLE_TTL=0 disables and falls back
+        # to the unified SESSION_TTL.
+        if entry.get("state") == "idle" and IDLE_TTL > 0 and age >= IDLE_TTL:
             continue
         # age = time since last state change (ts is bumped on every mutate).
         # Not session-start; that's not actionable info for the user.
         out.append({
             "cwd": os.path.basename((entry.get("cwd") or "").rstrip("/")),
             "state": entry.get("state", "idle"),
-            "age_s": int(now - ts),
+            "age_s": int(age),
         })
     # Split idle from active: active sorted by PRIO desc + age asc (freshness
     # cue); idle sorted alphabetically by cwd (no second-by-second reshuffle).
