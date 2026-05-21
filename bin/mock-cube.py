@@ -82,7 +82,7 @@ def _read_sessions_list():
         return []
     now = time.time()
     out = []
-    for entry in (d.get("sessions") or {}).values():
+    for sid, entry in (d.get("sessions") or {}).items():
         ts = entry.get("ts", 0)
         age = now - ts
         if age >= SESSION_TTL:
@@ -94,10 +94,16 @@ def _read_sessions_list():
             continue
         # age = time since last state change (ts is bumped on every mutate).
         # Not session-start; that's not actionable info for the user.
+        # session_id + label surface for the overlay's multi-session subline
+        # (visible when same cwd appears multiple times concurrently). label is
+        # the first user message of the session (same identifier claude --resume
+        # shows), captured by cube.sh from ~/.claude/projects/<...>/<sid>.jsonl.
         out.append({
             "cwd": os.path.basename((entry.get("cwd") or "").rstrip("/")),
             "state": entry.get("state", "idle"),
             "age_s": int(age),
+            "session_id": sid,
+            "label": entry.get("label", ""),
         })
     # Split idle from active: active sorted by PRIO desc + age asc (freshness
     # cue); idle sorted alphabetically by cwd (no second-by-second reshuffle).

@@ -38,6 +38,7 @@ html, body {
   --bar-track: #f2d0e0;
   --bar-fill:  #ff5ba1;
   --usage-fg:  #8a2862;
+  --subline:   #a07490;
   --gif-shadow: 0 3px 10px rgba(140,60,100,0.20);
   --card-shadow:
     0 1px 0 rgba(255,255,255,0.75) inset,
@@ -69,6 +70,7 @@ html, body {
   --bar-track: #3a0f28;
   --bar-fill:  #ff5ba1;
   --usage-fg:  #ff8ec8;
+  --subline:   #b88098;
   --gif-shadow: 0 4px 12px rgba(0,0,0,0.5);
   --card-shadow:
     0 1px 0 rgba(255,255,255,0.05) inset,
@@ -96,6 +98,7 @@ html, body {
   --bar-track: #dcd0ec;
   --bar-fill:  #7458d6;
   --usage-fg:  #4b2a96;
+  --subline:   #7a6ca8;
   --acc-permission: #ff5ba1;
   --acc-thinking:   #7458d6;
   --acc-done:       #5fa83f;
@@ -117,6 +120,7 @@ html, body {
   --bar-track: #231642;
   --bar-fill:  #9b85ff;
   --usage-fg:  #b59cff;
+  --subline:   #9a8ec0;
   --gif-shadow: 0 4px 12px rgba(0,0,0,0.5);
   --card-shadow:
     0 1px 0 rgba(255,255,255,0.05) inset,
@@ -260,6 +264,33 @@ html, body {
   height: 1px;
   margin: 5px 2px 4px;
   background: var(--divider);
+}
+
+/* ───────────────────────────── subline (session label)
+   Shown only on rows whose cwd appears more than once in the current
+   sessions list. label = first user message (same identifier
+   claude --resume shows). Indented to start under the cwd column
+   (dot + gap = 15 px) so it visually 'belongs' to its row. Inherits
+   Quicksand from body (prose, not technical ids — sans-serif reads
+   better than monospace for human text). */
+.subline {
+  padding-left: 15px;
+  padding-right: 10px;
+  font-size: 10px;
+  font-weight: 500;
+  font-style: italic;
+  letter-spacing: 0.1px;
+  color: var(--subline);
+  opacity: 0.78;
+  line-height: 1.25;
+  margin-top: 1px;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@container (max-width: 160px) {
+  .subline { font-size: 9px; padding-left: 14px; }
 }
 
 /* ───────────────────────────── usage */

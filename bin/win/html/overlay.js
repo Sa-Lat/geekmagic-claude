@@ -24,10 +24,16 @@ const SAMPLE_DATA = {
   ts: 0,
   usage_5h_pct: 42,
   sessions: [
-    { state: "permission", cwd: "navigatoren", age_s: 12 },
-    { state: "thinking",   cwd: "cube",        age_s: 184 },
-    { state: "done",       cwd: "fleet-mgmt",  age_s: 0 },
-    { state: "idle",       cwd: "backend-api", age_s: 0 },
+    { state: "permission", cwd: "navigatoren", age_s: 12,
+      session_id: "a4f29b12-...", label: "Fix the auth middleware bug" },
+    { state: "thinking",   cwd: "cube",        age_s: 184,
+      session_id: "7f3a2b88-...", label: "Werden Fehler im Code abgefangen" },
+    { state: "error",      cwd: "cube",        age_s: 47,
+      session_id: "9c1d4401-...", label: "Add multi-session subline to overlay" },
+    { state: "done",       cwd: "cube",        age_s: 0,
+      session_id: "2e8a01ff-...", label: "Refactor cube.sh mutate logic" },
+    { state: "idle",       cwd: "backend-api", age_s: 0,
+      session_id: "d3b72077-...", label: "Investigate slow API endpoint" },
   ],
 };
 
@@ -78,16 +84,35 @@ function setSkinTheme(skin, theme) {
   }
 }
 
-function sigOfSessions(sessions) {
-  return sessions.map(s =>
-    AGELESS.has(s.state)
-      ? `${s.cwd}|${s.state}|-`
-      : `${s.cwd}|${s.state}|${Math.floor((s.age_s || 0) / 30)}`
-  ).join(",");
+/* Compute the label subline for a session whose cwd appears more than
+ * once in the current visible list. Label = first user message of the
+ * Claude session (same identifier claude --resume shows), pre-truncated
+ * by cube.sh to ~60 chars. CSS handles the ellipsis at card width.
+ * Empty (= no subline) when label missing or cwd appears only once.
+ */
+function sublineText(s, cwdCounts) {
+  if ((cwdCounts.get(s.cwd) || 0) <= 1) return "";
+  return s.label || "";
+}
+
+function sigOfSessions(sessions, cwdCounts) {
+  return sessions.map(s => {
+    const sub = sublineText(s, cwdCounts);
+    return AGELESS.has(s.state)
+      ? `${s.cwd}|${s.state}|-|${sub}`
+      : `${s.cwd}|${s.state}|${Math.floor((s.age_s || 0) / 30)}|${sub}`;
+  }).join(",");
 }
 
 function renderRows(sessions) {
-  const sig = sigOfSessions(sessions);
+  // Count cwd occurrences once per render so we can decide which rows
+  // need a subline. Counted over the full visible slice.
+  const cwdCounts = new Map();
+  for (const s of sessions) {
+    cwdCounts.set(s.cwd, (cwdCounts.get(s.cwd) || 0) + 1);
+  }
+
+  const sig = sigOfSessions(sessions, cwdCounts);
   if (sig === last.rowSig) {
     /* still need to refresh ages every second since sig only buckets at 30s */
     for (let i = 0; i < sessions.length; i++) {
@@ -103,6 +128,12 @@ function renderRows(sessions) {
   /* full rebuild — small list, faster than diff-by-cwd */
   rowsEl.innerHTML = "";
   for (const s of sessions) {
+    // Each session is a 'block' element holding the main grid row + an
+    // optional subline beneath it. Block (not row) is the unit we append
+    // so the subline tracks with its parent row through sort changes.
+    const block = document.createElement("div");
+    block.className = "row-block";
+
     const row = document.createElement("div");
     row.className = "row";
 
@@ -130,7 +161,17 @@ function renderRows(sessions) {
     row.appendChild(dot);
     row.appendChild(cwd);
     row.appendChild(meta);
-    rowsEl.appendChild(row);
+    block.appendChild(row);
+
+    const subTxt = sublineText(s, cwdCounts);
+    if (subTxt) {
+      const sub = document.createElement("div");
+      sub.className = "subline";
+      sub.textContent = subTxt;
+      block.appendChild(sub);
+    }
+
+    rowsEl.appendChild(block);
   }
 }
 
