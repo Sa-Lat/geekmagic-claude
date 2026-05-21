@@ -65,6 +65,15 @@ except (AttributeError, OSError):
     except (AttributeError, OSError):
         pass
 
+# pywebview's logger emits multi-KB "Error while processing
+# window.native.AccessibilityObject.Bounds.Empty.Empty.Empty..." spam when
+# pythonnet hits the System.Drawing.Rectangle.Empty self-reference cycle.
+# The error is caught internally — we just don't want 10 KB of recursion
+# noise in the crash log. Set BEFORE importing webview so the logger is
+# already at the right level when pywebview's modules attach handlers.
+import logging
+logging.getLogger("pywebview").setLevel(logging.CRITICAL)
+
 import webview  # pip install pywebview
 
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "cube")
@@ -204,6 +213,7 @@ MENU_IDS = {
     "pos_lock": 120, "pos_reset": 121,
     "size_140": 130, "size_180": 131, "size_240": 132,
     "win_topmost": 140, "win_lift": 141, "win_front": 142,
+    "win_gif": 143,
     "hide": 150, "quit": 151,
 }
 
@@ -341,6 +351,19 @@ def save_layout_anchor(fp, anchor_r, anchor_b):
     os.replace(tmp, LAYOUTS_PATH)
 
 
+def anchor_in_bounds(anchor_r, anchor_b, w, h, primary):
+    """Saved anchor must place the whole window within primary monitor.
+    Returns False for stale anchors from a previous (larger) layout — the
+    caller then falls back to bottom-right of current primary. Without
+    this check, layout shrinks (dock undock, monitor unplug) leave the
+    overlay positioned off-screen with no in-app way to recover."""
+    px, py, pw, ph = primary
+    x = anchor_r - w
+    y = anchor_b - h
+    return (px <= x and x + w <= px + pw
+            and py <= y and y + h <= py + ph)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # JS bridge
 # ─────────────────────────────────────────────────────────────────────────
@@ -368,11 +391,18 @@ class JsApi:
         self.topmost = env.get("CUBE_OVERLAY_TOPMOST", "1") == "1"
         self.lift_on_activity = env.get(
             "CUBE_OVERLAY_LIFT_ON_ACTIVITY", "0") == "1"
+        self.hide_gif = env.get("CUBE_OVERLAY_HIDE_GIF", "0") == "1"
         # runtime (set after window creation)
         self.hwnd = None
         self.window = None
         self.fingerprint = None
         self.primary_rect = (0, 0, 1920, 1080)
+        # Stable bottom-right anchor in physical pixels. Set in main() at
+        # startup, updated by drag-end and reset_position. resize_height
+        # uses this instead of `rect.b` so a WinForms-DPI-scaled rect
+        # can't lock the window off-screen.
+        self.anchor_r = None
+        self.anchor_b = None
         # hide/show + activity tracking
         self.hidden_by_user = False
         self.hide_winner = None
@@ -409,6 +439,7 @@ class JsApi:
             return None
         d["theme"] = self.theme  # JS uses this to set data-theme
         d["locked"] = self.locked  # JS uses to gate drag UX
+        d["hide_gif"] = self.hide_gif  # JS hides .gif-wrap + .divider when on
         state = d.get("state")
         # Auto-unhide if user-hidden and state differs from hide_winner.
         if self.hidden_by_user and state != self.hide_winner and self.window:
@@ -443,6 +474,7 @@ class JsApi:
             "locked": self.locked,
             "topmost": self.topmost,
             "lift": self.lift_on_activity,
+            "hide_gif": self.hide_gif,
             "size_presets": list(SIZE_PRESETS),
         }
 
@@ -473,13 +505,22 @@ class JsApi:
             return None
         self.width = w
         write_overlay_env({"CUBE_OVERLAY_WIDTH": str(w)})
-        # Resize window: keep bottom-right corner stable (anchor preserved).
+        # Resize window: keep stored bottom-right anchor stable (so size
+        # changes don't drag a wrongly-positioned rect along).
         rect = win32_get_rect(self.hwnd)
         if rect:
             l, t, r, b = rect
             h = b - t
-            new_x = r - w
-            win32_move(self.hwnd, new_x, t, w, h)
+            anchor_r = self.anchor_r if self.anchor_r is not None else r
+            anchor_b = self.anchor_b if self.anchor_b is not None else b
+            new_x = anchor_r - w
+            new_y = anchor_b - h
+            px, py, pw, ph = self.primary_rect
+            if new_x < px: new_x = px
+            if new_x + w > px + pw: new_x = px + pw - w
+            if new_y < py: new_y = py
+            if new_y + h > py + ph: new_y = py + ph - h
+            win32_move(self.hwnd, new_x, new_y, w, h)
         return w
 
     def set_lock(self, on):
@@ -500,6 +541,12 @@ class JsApi:
         write_overlay_env({"CUBE_OVERLAY_LIFT_ON_ACTIVITY":
                            "1" if self.lift_on_activity else "0"})
         return self.lift_on_activity
+
+    def set_hide_gif(self, on):
+        self.hide_gif = bool(on)
+        write_overlay_env({"CUBE_OVERLAY_HIDE_GIF":
+                           "1" if self.hide_gif else "0"})
+        return self.hide_gif
 
     # ── window-management ───────────────────────────────────────────────
     def _bring_to_front_async(self):
@@ -589,6 +636,7 @@ class JsApi:
         ck_lock = MF_CHECKED if self.locked else 0
         ck_top = MF_CHECKED if self.topmost else 0
         ck_lift = MF_CHECKED if self.lift_on_activity else 0
+        ck_gif = MF_CHECKED if not self.hide_gif else 0  # "Show GIF" — checked = visible
         ck_w140 = MF_CHECKED if self.width == 140 else 0
         ck_w180 = MF_CHECKED if self.width == 180 else 0
         ck_w240 = MF_CHECKED if self.width == 240 else 0
@@ -614,6 +662,7 @@ class JsApi:
         win_m = self._mk_submenu([
             (ck_top, M["win_topmost"], "Always on Top", 0),
             (ck_lift, M["win_lift"], "Lift on Activity", 0),
+            (ck_gif, M["win_gif"], "Show GIF", 0),
             (0, M["win_front"], "Bring to Front", 0),
         ])
         root_m = self._mk_submenu([
@@ -666,6 +715,8 @@ class JsApi:
             self.set_topmost(not self.topmost)
         elif cmd_id == M["win_lift"]:
             self.set_lift(not self.lift_on_activity)
+        elif cmd_id == M["win_gif"]:
+            self.set_hide_gif(not self.hide_gif)
         elif cmd_id == M["win_front"]:
             self.bring_to_front()
         elif cmd_id == M["hide"]:
@@ -684,6 +735,8 @@ class JsApi:
         new_x = anchor_r - self.width
         new_y = anchor_b - h
         win32_move(self.hwnd, new_x, new_y, self.width, h)
+        self.anchor_r = anchor_r
+        self.anchor_b = anchor_b
         save_layout_anchor(self.fingerprint, anchor_r, anchor_b)
 
     def save_anchor(self):
@@ -691,6 +744,8 @@ class JsApi:
         if not rect or not self.fingerprint:
             return
         l, t, r, b = rect
+        self.anchor_r = r
+        self.anchor_b = b
         save_layout_anchor(self.fingerprint, r, b)
 
     # ── drag ────────────────────────────────────────────────────────────
@@ -734,8 +789,15 @@ class JsApi:
     # ── dynamic height ──────────────────────────────────────────────────
     def resize_height(self, h):
         """JS ResizeObserver reports `.wrap` content height after every
-        DOM mutation. Resize the OS window to match, keeping the
-        bottom-right anchor fixed (so cards "grow upward")."""
+        DOM mutation. Resize the OS window to match.
+
+        Bottom-right anchor is read from `self.anchor_b` (set at startup,
+        updated on drag-end/reset). Earlier versions anchored at
+        `rect.b` — but WinForms DPI-scaling can leave the post-creation
+        rect off-screen (logical pixels passed through Form.Top scale
+        by the monitor's DPI factor), and anchoring there locks the
+        window off-screen forever. Stored anchor is in physical pixels
+        and bounds-checked against primary, so it always lands on-screen."""
         if not self.hwnd:
             sys.stderr.write(f"resize_height({h}): no hwnd\n")
             return
@@ -753,10 +815,27 @@ class JsApi:
             return
         if new_h == cur_h:
             return
-        new_y = b - new_h
+        # Prefer the stored anchor for the bottom edge. Falls back to
+        # rect.b only if anchor was somehow never initialised.
+        anchor_b = self.anchor_b if self.anchor_b is not None else b
+        anchor_r = self.anchor_r if self.anchor_r is not None else r
+        new_y = anchor_b - new_h
+        new_x = anchor_r - w
+        # Clamp into primary monitor so a very tall card (or a stale
+        # anchor) can't push the window off-screen.
+        px, py, pw, ph = self.primary_rect
+        if new_y < py:
+            new_y = py
+        if new_y + new_h > py + ph:
+            new_y = py + ph - new_h
+        if new_x < px:
+            new_x = px
+        if new_x + w > px + pw:
+            new_x = px + pw - w
         sys.stderr.write(
-            f"resize_height: {cur_h} -> {new_h} (y {t}->{new_y}, b stays {b})\n")
-        win32_move(self.hwnd, l, new_y, w, new_h)
+            f"resize_height: {cur_h} -> {new_h} "
+            f"(rect t={t} b={b}; anchor_b={anchor_b}; pos -> {new_x},{new_y})\n")
+        win32_move(self.hwnd, new_x, new_y, w, new_h)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -804,6 +883,14 @@ def main():
     if fp in layouts:
         anchor_r = int(layouts[fp].get("anchor_r", px + pw - 20))
         anchor_b = int(layouts[fp].get("anchor_b", py + ph - 20))
+        if not anchor_in_bounds(anchor_r, anchor_b,
+                                init_w, init_h, layout["primary"]):
+            sys.stderr.write(
+                f"saved anchor ({anchor_r},{anchor_b}) out of primary "
+                f"bounds {layout['primary']}; resetting to bottom-right\n")
+            anchor_r = px + pw - 20
+            anchor_b = py + ph - 20
+            save_layout_anchor(fp, anchor_r, anchor_b)
     else:
         anchor_r = px + pw - 20
         anchor_b = py + ph - 20
@@ -811,6 +898,8 @@ def main():
 
     x = anchor_r - init_w
     y = anchor_b - init_h
+    api.anchor_r = anchor_r
+    api.anchor_b = anchor_b
 
     sys.stderr.write(
         f"mock={mock_url}  layout={fp}  primary={px},{py},{pw}x{ph}  "

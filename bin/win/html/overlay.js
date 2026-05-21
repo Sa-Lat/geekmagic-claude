@@ -176,26 +176,39 @@ function renderRows(sessions) {
 }
 
 function renderUsage(pct) {
-  if (pct === last.usagePct) return;
-  last.usagePct = pct;
-  if (pct == null) {
+  /* In slim mode (hide_gif) the usage row is the only thing below the
+   * session list, so always show it — placeholder "—" while pct null
+   * (e.g. ccusage not running yet). In normal mode keep the auto-hide
+   * so a missing ccusage doesn't leave an empty "Use —" sitting above
+   * the GIF. */
+  const slim = !!ui.hide_gif;
+  const sig = `${pct}|${slim ? 1 : 0}`;
+  if (sig === last.usagePct) return;
+  last.usagePct = sig;
+  if (pct == null && !slim) {
     usageRowEl.hidden = true;
     dividerEl.hidden = true;
     return;
   }
   usageRowEl.hidden = false;
-  dividerEl.hidden = false;
-  usagePctEl.textContent = `${pct}%`;
-  barFillEl.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-  const override = usageFill(pct);
-  barFillEl.style.background = override || "";  /* "" = inherit --bar-fill */
+  dividerEl.hidden = slim;  /* divider only between rows and Use when GIF present */
+  if (pct == null) {
+    usagePctEl.textContent = "—";
+    barFillEl.style.width = "0%";
+    barFillEl.style.background = "";
+  } else {
+    usagePctEl.textContent = `${pct}%`;
+    barFillEl.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    const override = usageFill(pct);
+    barFillEl.style.background = override || "";  /* "" = inherit --bar-fill */
+  }
 }
 
 async function renderGif(img, ts) {
-  const key = `${img}|${ts}`;
+  const key = `${img}|${ts}|${ui.hide_gif ? "off" : "on"}`;
   if (key === last.gifKey) return;
   last.gifKey = key;
-  if (!img) {
+  if (ui.hide_gif || !img) {
     gifWrapEl.hidden = true;
     return;
   }
@@ -211,6 +224,12 @@ async function renderGif(img, ts) {
   } else {
     gifWrapEl.hidden = true;  /* preview-mode: no GIF without bridge */
   }
+}
+
+/* Bust render cache so next poll re-evaluates divider + gif visibility. */
+function invalidateRender() {
+  last.gifKey = null;
+  last.usagePct = undefined;
 }
 
 function render(data) {
@@ -246,6 +265,10 @@ async function poll() {
         ui.locked = data.locked;
         applyUi();
       }
+      if (typeof data.hide_gif === "boolean" && data.hide_gif !== ui.hide_gif) {
+        ui.hide_gif = data.hide_gif;
+        invalidateRender();
+      }
       maybeLift(data.state);
     }
   }
@@ -275,6 +298,7 @@ const ui = {
   size_presets: [140, 180, 240],
   hide_winner: null,
   hidden: false,
+  hide_gif: false,
 };
 const api = () => window.pywebview && window.pywebview.api;
 
