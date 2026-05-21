@@ -119,16 +119,17 @@ push() {
 # Prints "<winner>\t<seq>" (seq is '-' for evict, -1 for recap-suppressed).
 # Atomic via flock + temp+rename.
 mutate() {
-  local op="$1" sid="$2" new_state="${3:-idle}" cwd="${4:-}"
+  local op="$1" sid="$2" new_state="${3:-idle}" cwd="${4:-}" label="${5:-}"
   mkdir -p "$(dirname "$SESSIONS_FILE")" 2>/dev/null || true
   exec 9>"$SESSIONS_FILE.lock"
   flock -x 9 2>/dev/null || true
-  python3 - "$SESSIONS_FILE" "$op" "$sid" "$new_state" "$SESSION_TTL" "$RECAP_WINDOW" "$cwd" "$IDLE_TTL" <<'PY'
+  python3 - "$SESSIONS_FILE" "$op" "$sid" "$new_state" "$SESSION_TTL" "$RECAP_WINDOW" "$cwd" "$IDLE_TTL" "$label" <<'PY'
 import json, os, sys, tempfile, time
 path, op, sid, new_state = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 ttl, recap_window = int(sys.argv[5]), int(sys.argv[6])
 cwd = sys.argv[7] if len(sys.argv) > 7 else ""
 idle_ttl = int(sys.argv[8]) if len(sys.argv) > 8 else 0
+label = sys.argv[9] if len(sys.argv) > 9 else ""
 try:
     with open(path) as f:
         data = json.load(f)
@@ -184,6 +185,12 @@ if op == "update":
             entry["cwd"] = cwd
         elif "cwd" in prev:
             entry["cwd"] = prev["cwd"]
+        # label = first user prompt; SessionStart fires before any prompt
+        # exists so label is empty there. Sticky once populated.
+        if label:
+            entry["label"] = label
+        elif "label" in prev:
+            entry["label"] = prev["label"]
         data["sessions"][sid] = entry
 elif op == "evict":
     data["sessions"].pop(sid, None)
@@ -251,10 +258,36 @@ print(v.get("prev_state", "idle"))
 }
 
 show() {
-  local new_state="$1" hook_in="" sid cwd out winner seq delay=0 target=idle
+  local new_state="$1" hook_in="" sid cwd label="" out winner seq delay=0 target=idle
   [[ -t 0 ]] || hook_in=$(cat)
   IFS=$'\t' read -r sid cwd < <(parse_hook "$hook_in")
-  out=$(mutate update "$sid" "$new_state" "$cwd")
+  # Resolve session label = first user message from Claude's per-project JSONL
+  # (same source claude --resume shows). Encoded cwd: '/' → '-'. SessionStart
+  # fires before any user prompt exists, so label is empty there; mutate's
+  # carry-forward keeps it sticky once a later UserPromptSubmit populates it.
+  if [[ -n "$sid" && "$sid" != "cli" && -n "$cwd" ]]; then
+    local encoded="${cwd//\//-}"
+    local jsonl="$HOME/.claude/projects/${encoded}/${sid}.jsonl"
+    if [[ -f "$jsonl" ]]; then
+      label=$(timeout 0.3 python3 - "$jsonl" 2>/dev/null <<'PY' || true
+import json, sys
+with open(sys.argv[1]) as f:
+    for line in f:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("message", {}).get("role") == "user":
+            c = d["message"].get("content", "")
+            t = c if isinstance(c, str) else (c[0].get("text", "") if c else "")
+            t = " ".join(t.split())
+            print(t[:60])
+            break
+PY
+)
+    fi
+  fi
+  out=$(mutate update "$sid" "$new_state" "$cwd" "$label")
   winner="${out%%$'\t'*}"
   seq="${out##*$'\t'}"
   # seq=-1 signals recap suppression — no push, no revert scheduling.
