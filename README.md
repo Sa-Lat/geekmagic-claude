@@ -93,8 +93,13 @@ cube/
 │   ├── cube-overlay.py   ← Frameless Tk-Window (WSLg), spiegelt mock-cube auf Desktop
 │   ├── cube-overlay.service ← systemd --user Unit für overlay
 │   ├── win/
-│   │   ├── cube-overlay-win.pyw ← Windows-natives Overlay (CPython+Tk, WSLg-frei)
-│   │   └── README.md            ← Setup für Windows-Host (POC)
+│   │   ├── cube-overlay-win.pyw       ← Windows-natives Overlay (CPython+Tk, WSLg-frei)
+│   │   ├── cube-overlay-win.cmd       ← Autostart-Wrapper (Startup-Folder)
+│   │   ├── cube-overlay-win-html.pyw  ← HTML/WebView2-Variante (pywebview, Mochi Classic)
+│   │   ├── cube-overlay-win-html.cmd  ← Autostart-Wrapper für HTML-Variante
+│   │   ├── cube-overlay-win-html.ps1  ← PowerShell-Variante
+│   │   ├── html/                       ← index.html + overlay.css + overlay.js (inlined at start)
+│   │   └── README.md                  ← Setup für Windows-Host
 │   ├── deploy.sh         ← Sync bin/* → ~/.claude/bin/ + systemd-Units
 │   ├── cycle.sh          ← Visueller Smoke-Test
 │   └── clear-old.sh      ← Räumt Cube auf (Dry-run + --force)
@@ -409,28 +414,38 @@ Workarounds wenn unverzichtbar:
   topmost-ohne-focus-grab markiert (einmalige Einrichtung, ewig stabil)
 - Web-Overlay (HTML-Page die `localhost:8080/dashboard.json` pollt) statt Tk —
   läuft im Windows-Browser, WSLg-immun, aber größeres Refactor
-- **Windows-natives Overlay** (`bin/win/cube-overlay-win.pyw`, siehe unten) —
+- **Windows-natives Overlay** (`bin/win/cube-overlay-win.pyw` Tk, oder
+  `bin/win/cube-overlay-win-html.pyw` HTML/WebView2, siehe unten) —
   umgeht WSLg komplett.
 
-### Windows-natives Overlay (POC)
+### Windows-natives Overlay
 
-Alternativ läuft das Overlay direkt als Windows-CPython-Prozess (`pythonw.exe`)
-und pollt mock-cube über die WSL-Distro-IP (`wsl.exe hostname -I`). Damit
-verschwinden Focus-Steal, Re-Lift-Hack und der `127.0.0.1`-Konflikt mit
-Docker-Containern — Traffic geht WSL-IP-direkt, kein localhost-Forward.
+Zwei parallele Implementierungen, beide laufen direkt als Windows-Prozess
+(`pythonw.exe`) und pollen mock-cube über die WSL-Distro-IP
+(`wsl.exe hostname -I`). Damit verschwinden Focus-Steal, Re-Lift-Hack und der
+`127.0.0.1`-Konflikt mit Docker-Containern — Traffic geht WSL-IP-direkt, kein
+localhost-Forward.
 
-Voraussetzungen Windows-seitig: Python 3.11+, `py -m pip install --user Pillow`.
+| Variante | Datei | Stack | Look |
+|---|---|---|---|
+| Tk (Default) | `cube-overlay-win.pyw` | CPython 3.11+ + Tk + Pillow | klassisches Dashboard, kompakt |
+| HTML | `cube-overlay-win-html.pyw` | CPython 3.13 + pywebview/WebView2 | Mochi Classic (Quicksand, Glow-Dots, Sonar-Ripple, abgerundete Card) |
+
+Gemeinsamer Code: `%APPDATA%\cube\overlay.env` + `overlay-layouts.json`
+(Anchor pro Monitor-Layout-Fingerprint), Skin-Routing über `GET /set?skin=NAME`
+an mock-cube (das zu `cube.sh skin NAME` + `cube.sh redisplay` proxyt).
+`~/.claude/.cube-skin` (WSL) bleibt Source of Truth, beide Overlays
+synchronisieren über die Poll-Loop. Theme / Position / Size lokal im
+Rechtsklick-Menü mutable.
+
+Voraussetzungen Windows-seitig:
+- Tk-Variante: Python 3.11+, `py -m pip install --user Pillow`
+- HTML-Variante: Python 3.13 (pythonnet hat noch keine 3.14-Wheels),
+  `py -3.13 -m pip install --user pywebview`
+
 WSL-seitig: `CUBE_MOCK_HOST=0.0.0.0` in `~/.config/cube/config` setzen +
 `systemctl --user restart mock-cube.service`. Setup-Details, CLI-Flags und
 Troubleshooting: [`bin/win/README.md`](bin/win/README.md).
-
-Skin-Wechsel aus dem Windows-Overlay routet via `GET /set?skin=NAME` an
-mock-cube, das zu `cube.sh skin NAME` + `cube.sh redisplay` proxyt;
-`~/.claude/.cube-skin` (WSL) bleibt Source of Truth, beide Overlays
-synchronisieren über die Poll-Loop. Theme / Position / Size sind lokal im
-Windows-Menü mutable (gespeichert unter `%APPDATA%\cube\`). Beide Overlays
-(`cube-overlay.py` für WSLg + `cube-overlay-win.pyw` für Windows-nativ)
-existieren parallel — User wählt je nach Setup.
 
 ## Quellen / Inspiration
 

@@ -1,8 +1,20 @@
-# cube-overlay-win (Windows-natives Overlay, POC)
+# cube-overlay-win (Windows-natives Overlay)
 
-Windows-native Variante des Tk-Overlays. Ersetzt `bin/cube-overlay.py` für
+Windows-native Varianten des Overlays. Ersetzen `bin/cube-overlay.py` für
 Windows-Hosts — kein WSLg-Compositor, kein Focus-Steal, kein
 localhost-Forward-Konflikt mit Docker.
+
+Zwei Implementierungen koexistieren:
+
+| Datei | Stack | Look | Wahl |
+|---|---|---|---|
+| `cube-overlay-win.pyw` | CPython + Tk + Pillow | Kompaktes klassisches Dashboard | Default, minimale Deps |
+| `cube-overlay-win-html.pyw` | CPython 3.13 + pywebview/WebView2 | Mochi Classic (Quicksand, Glow-Dots, Sonar-Ripple, abgerundete Card, dynamische Höhe) | Für moderneren Look |
+
+Beide teilen sich `%APPDATA%\cube\overlay.env` + `overlay-layouts.json`
+(gleiche Keys, gleiche Anchor-Logik), WSL-IP-Resolution, Skin-Routing.
+Konfigurationsänderungen aus einer Variante werden von der anderen beim
+nächsten Start gelesen.
 
 ## Architektur
 
@@ -22,14 +34,22 @@ Connection-Drift (≥3 fehlgeschlagene Polls) neu ermittelt.
 
 ### 1. Python auf Windows
 
+Für die **Tk-Variante** (`cube-overlay-win.pyw`):
 ```powershell
 py --version          # ≥ 3.11
 py -m pip install --user Pillow
 ```
 
+Für die **HTML-Variante** (`cube-overlay-win-html.pyw`):
+```powershell
+py -3.13 --version    # genau 3.13 (pythonnet hat noch keine 3.14-Wheels)
+py -3.13 -m pip install --user pywebview
+```
+
 Wenn `py` fehlt: Python von [python.org](https://www.python.org/downloads/) oder
 aus dem Microsoft Store installieren. Tkinter ist im CPython-Windows-Bundle
-enthalten.
+enthalten. WebView2-Runtime ist auf aktuellen Windows-11-Builds vorinstalliert
+(sonst Edge-Update / Edge-WebView2-Standalone-Installer).
 
 ### 2. mock-cube auf 0.0.0.0 binden (WSL-Seite)
 
@@ -53,8 +73,14 @@ JSON-Antwort = bereit.
 
 ### 4. Start
 
+Tk-Variante:
 ```powershell
 py "\\wsl$\Ubuntu\home\<user>\projects\cube\bin\win\cube-overlay-win.pyw"
+```
+
+HTML-Variante:
+```powershell
+py -3.13 "\\wsl$\Ubuntu\home\<user>\projects\cube\bin\win\cube-overlay-win-html.pyw"
 ```
 
 Oder Datei in einen Windows-Pfad kopieren und per Doppelklick starten
@@ -63,8 +89,15 @@ Oder Datei in einen Windows-Pfad kopieren und per Doppelklick starten
 ### 5. Autostart (optional)
 
 Per Startup-Folder-Shortcut: `Win+R` → `shell:startup` öffnet
-`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`. Repo-Datei
-`bin/win/cube-overlay-win.cmd` dort hin kopieren (oder via Symlink/Verknüpfung).
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`. Repo-Datei dort hin
+kopieren (oder via Symlink/Verknüpfung):
+
+- Tk-Variante: `bin/win/cube-overlay-win.cmd`
+- HTML-Variante: `bin/win/cube-overlay-win-html.cmd` (oder `.ps1`)
+
+HTML-Wrapper pinnt Python auf `-3.13` via `CUBE_OVERLAY_PY` (überschreibbar
+falls neuere pythonnet-Wheels vorhanden), nutzt `CUBE_OVERLAY_UNC_HTML` als
+UNC-Override (analog zu `CUBE_OVERLAY_UNC` für Tk).
 
 Inhalt der `cube-overlay-win.cmd`:
 
@@ -155,6 +188,38 @@ Per-Maschine-Settings unter `%APPDATA%\cube\`:
   `~/.claude/.cube-skin` bleibt Source of Truth, beide Overlays (Windows +
   WSLg) flippen über ihre poll-loops synchron.
 
+### HTML-Variante: Designnotes
+
+- **Mochi Classic** Look — Port von `dir-mochi.jsx` nach Plain-CSS, Quicksand
+  via Google Fonts, abgerundete Card mit Inset-Shadow, Glow-Dots mit
+  Sonar-Ripple-Animation auf Live-States (`permission`/`error`/`compact`/
+  `alert`/`thinking`).
+- **Native Win32 Popup-Menü** (`TrackPopupMenu`) statt DOM-Context-Menu —
+  Submenüs würden bei 180-240 px Card-Breite vom WebView2-Frame geclippt.
+- **Dynamische Höhe** — JS `ResizeObserver` meldet `.wrap`-Höhe an Python,
+  Window resized live mit fixiertem bottom-right-Anchor (Card "wächst nach
+  oben"). Keine Black-Space mehr unter Content.
+- **Drag** ist JS-gesteuert; Python liest jeweils `GetCursorPos` (Physical-
+  Pixel) statt sich auf WebView2 `screenX/Y` (Logical-Pixel) zu verlassen —
+  korrekt unter Per-Monitor-DPI.
+- **Palette-Tokens** pro `skin × theme` als `:root[data-skin=...][data-theme=...]`-
+  Selektoren in `overlay.css`. JS swappt beide Attribute auf `<html>` für
+  saubere Cascade-Re-Resolution.
+- **Opaque Window** (kein `transparent=True`) — EdgeChromium Layered-Window-
+  Compositing bricht das Painting auf den meisten pywebview-Builds (DWM zeigt
+  Content im Taskbar-Preview, eigentliches Fenster bleibt unsichtbar). Body-BG
+  matcht Card-Farbe → rechteckige Fensterkanten verschmelzen mit der Card.
+- **Inline-HTML** — CSS/JS werden beim Start in `index.html` injected und
+  `html=...` an `webview.create_window` übergeben. WebView2 kann `file://`
+  von UNC-Paths (`\\wsl.localhost\...`) nicht laden, pywebviews transienter
+  HTTP-Server hingegen serviert inlined HTML problemlos.
+- **HWND-Discovery** — `window.native.Handle.ToInt64()` zuerst; bei Failure
+  (pywebviews `__repr__` rekursiert über `AccessibilityObject` und sprengt den
+  Stack) Fallback auf `EnumWindows` mit PID-Filter.
+- **Preview im Browser** — `bin/win/html/index.html` direkt im Browser öffnen
+  zeigt `SAMPLE_DATA`; `?theme=dark&skin=orb`-Query erlaubt Palette-Variation
+  ohne pywebview.
+
 ## Troubleshooting
 
 **Overlay startet, zeigt aber nichts / kein GIF**: 
@@ -185,3 +250,21 @@ selbst auf `pythonw.exe` auf. `.cmd` auf `start "" py ...` statt
 Python für Windows nachinstallieren — `winget install Python.Python.3.12` oder
 python.org-Installer mit **Add Python to PATH** + **py launcher** aktiviert.
 Danach neue PowerShell-Session öffnen (PATH wird beim Start gelesen).
+
+**HTML-Variante: `ModuleNotFoundError: pythonnet`**:  
+`py -3.13 -m pip install --user pywebview` läuft nicht durch oder pinnt eine
+ältere pywebview-Version. Frische Installation: `py -3.13 -m pip install --user --upgrade pywebview pythonnet`.
+Python ≠ 3.13? `CUBE_OVERLAY_PY` in der `.cmd` auf die richtige Version setzen
+oder direkt `py -X.Y` testen.
+
+**HTML-Variante: Window kommt nicht hoch, kein Fehler sichtbar**:  
+`%TEMP%\cube-overlay-win-html.log` lesen — stderr wird dorthin geleitet,
+inkl. `sys.excepthook`-Traceback bei Crashes. Häufige Ursachen: WebView2-Runtime
+fehlt (Edge installieren), pywebview-Version inkompatibel (`pip install --upgrade pywebview`),
+WSL nicht hochgefahren (`wsl.exe --exec true` läuft die `.cmd` schon vorher).
+
+**HTML-Variante: GIF wird nicht geladen, Cards sichtbar**:  
+mock-cube auf `0.0.0.0` gebunden? `/current.gif` antwortet
+(`curl http://<wsl-ip>:8080/current.gif -o /dev/null`)? Bei
+Connection-Drift nach `wsl --shutdown` re-detected der Bridge die IP nach 3
+verfehlten Polls automatisch (siehe Log).

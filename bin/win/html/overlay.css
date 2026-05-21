@@ -1,0 +1,316 @@
+/* Mochi Classic — light + dark variants. Ports dir-mochi.jsx (39-280)
+   to plain CSS. Skin × theme palettes via custom properties; root has
+   data-skin + data-theme attributes that JS swaps at runtime. */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  /* Window is opaque (transparent=True breaks under WebView2's
+     layered-window compositing). Body bg = card so the rectangular
+     window edges blend seamlessly with the inner card area. */
+  background: var(--card);
+  font-family: 'Quicksand', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+/* Wrap fills the window width; height = content. ResizeObserver in
+   overlay.js watches .wrap height and reports up to Python so the
+   OS window shrinks to fit (no black space below content). */
+#root, .wrap {
+  width: 100%;
+}
+
+/* ───────────────────────────── palette tokens
+   Defined on `:root` (= html) so body's `background: var(--card)`
+   resolves — otherwise card-coloured space below content would fall
+   through to the WebView2 canvas / window BackColor. */
+:root {
+  /* defaults overwritten by data-skin/data-theme combos below */
+  --card:      #fbe9f1;
+  --text:      #4a1834;
+  --meta:      #7a4866;
+  --brand:     #a8326a;
+  --brand-sub: #b88098;
+  --divider:   #f2d0e0;
+  --bar-track: #f2d0e0;
+  --bar-fill:  #ff5ba1;
+  --usage-fg:  #8a2862;
+  --gif-shadow: 0 3px 10px rgba(140,60,100,0.20);
+  --card-shadow:
+    0 1px 0 rgba(255,255,255,0.75) inset,
+    0 -1px 0 rgba(160,60,110,0.08) inset,
+    0 6px 16px rgba(160,60,120,0.16);
+  --dot-glow: none;  /* dark mode adds an outer glow */
+}
+
+/* waifu × light (default) */
+:root[data-skin="waifu"][data-theme="light"] {
+  --acc-permission: #ff4a96;
+  --acc-thinking:   #a875e0;
+  --acc-done:       #5fa83f;
+  --acc-idle:       #bd9fb1;
+  --acc-error:      #ff5a72;
+  --acc-compact:    #c060d8;
+  --acc-alert:      #ff8c4a;
+  --acc-start:      #7a8cff;
+}
+
+/* waifu × dark */
+:root[data-skin="waifu"][data-theme="dark"] {
+  --card:      #2a1226;
+  --text:      #ffe5f2;
+  --meta:      #d99eba;
+  --brand:     #ff8ec8;
+  --brand-sub: #a86b88;
+  --divider:   #4a1834;
+  --bar-track: #3a0f28;
+  --bar-fill:  #ff5ba1;
+  --usage-fg:  #ff8ec8;
+  --gif-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  --card-shadow:
+    0 1px 0 rgba(255,255,255,0.05) inset,
+    0 -1px 0 rgba(0,0,0,0.4) inset,
+    0 6px 18px rgba(0,0,0,0.5);
+  --dot-glow: 0 0 6px;
+  --acc-permission: #ff5ba1;
+  --acc-thinking:   #c08cf0;
+  --acc-done:       #7fce5a;
+  --acc-idle:       #a08090;
+  --acc-error:      #ff7088;
+  --acc-compact:    #d078e8;
+  --acc-alert:      #ffa060;
+  --acc-start:      #9aa8ff;
+}
+
+/* orb × light */
+:root[data-skin="orb"][data-theme="light"] {
+  --card:      #ece3f5;
+  --text:      #311566;
+  --meta:      #5a4a88;
+  --brand:     #5a3aa8;
+  --brand-sub: #8472c0;
+  --divider:   #dcd0ec;
+  --bar-track: #dcd0ec;
+  --bar-fill:  #7458d6;
+  --usage-fg:  #4b2a96;
+  --acc-permission: #ff5ba1;
+  --acc-thinking:   #7458d6;
+  --acc-done:       #5fa83f;
+  --acc-idle:       #8e7fb8;
+  --acc-error:      #ff5a72;
+  --acc-compact:    #a04ed8;
+  --acc-alert:      #ff8c4a;
+  --acc-start:      #5870e0;
+}
+
+/* orb × dark */
+:root[data-skin="orb"][data-theme="dark"] {
+  --card:      #1c1535;
+  --text:      #ebe3ff;
+  --meta:      #a89dd0;
+  --brand:     #b59cff;
+  --brand-sub: #7e6cad;
+  --divider:   #2a1d4d;
+  --bar-track: #231642;
+  --bar-fill:  #9b85ff;
+  --usage-fg:  #b59cff;
+  --gif-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  --card-shadow:
+    0 1px 0 rgba(255,255,255,0.05) inset,
+    0 -1px 0 rgba(0,0,0,0.4) inset,
+    0 6px 18px rgba(0,0,0,0.5);
+  --dot-glow: 0 0 6px;
+  --acc-permission: #ff7eb8;
+  --acc-thinking:   #9b85ff;
+  --acc-done:       #7fce5a;
+  --acc-idle:       #8e7fb8;
+  --acc-error:      #ff7088;
+  --acc-compact:    #b890ee;
+  --acc-alert:      #ffa060;
+  --acc-start:      #7e90ff;
+}
+
+/* ───────────────────────────── card chrome */
+.wrap {
+  box-sizing: border-box;
+  padding: 12px;
+  background: var(--card);
+  /* Inset-only shadow — outer drop shadow is invisible against the
+     opaque window edge (window itself is the card). */
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.75) inset,
+    0 -1px 0 rgba(160,60,110,0.08) inset;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* container-type lets `@container` rules below shrink text when the
+     card is at Small (140 px) without hard-coded breakpoints. */
+  container-type: inline-size;
+}
+
+/* Type-scale at Small: every text element drops by ~1 px. */
+@container (max-width: 160px) {
+  .brand     { font-size: 8px; letter-spacing: 1.4px; }
+  .brand-sub { font-size: 8px; }
+  .row       { font-size: 11px; padding: 3px 8px; }
+  .meta      { font-size: 9px; }
+  .usage     { font-size: 8px; letter-spacing: 1.2px; }
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 1.8px;
+  color: var(--brand);
+  text-transform: uppercase;
+  padding: 0 2px 6px;
+  opacity: 0.85;
+}
+.brand-sub {
+  margin-left: auto;
+  opacity: 0.6;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+}
+
+/* ───────────────────────────── rows */
+.row {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  column-gap: 8px;
+  color: var(--text);
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--acc);
+  position: relative;
+  /* Static halo per designer: `0 0 0 3px ${color}22` (~13% alpha). */
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 22%, transparent);
+}
+
+/* `--acc` per state, driven by attribute (not inline style). Chained
+   var() through inline-set custom-property occasionally fails to
+   re-resolve on data-skin/data-theme attribute swaps — using a
+   plain CSS rule sidesteps that bug entirely. */
+.dot[data-state="permission"] { --acc: var(--acc-permission); }
+.dot[data-state="thinking"]   { --acc: var(--acc-thinking); }
+.dot[data-state="done"]       { --acc: var(--acc-done); }
+.dot[data-state="idle"]       { --acc: var(--acc-idle); }
+.dot[data-state="error"]      { --acc: var(--acc-error); }
+.dot[data-state="compact"]    { --acc: var(--acc-compact); }
+.dot[data-state="alert"]      { --acc: var(--acc-alert); }
+.dot[data-state="start"]      { --acc: var(--acc-start); }
+
+/* Sonar-style ripple via pseudo-element: a sharp ring grows 0 → 8 px
+   outward and fades to transparent over the first 60 % of the cycle,
+   then rests transparent for the remaining 40 %. Decouples the
+   animation from the dot's own static halo so the two never compete. */
+.dot[data-live="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  animation: dot-ripple 1.5s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes dot-ripple {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--acc) 75%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--acc) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--acc) 0%, transparent);
+  }
+}
+.cwd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meta {
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--meta);
+  opacity: 0.62;
+}
+.meta[data-ageless="true"] {
+  opacity: 0.45;
+  letter-spacing: 0.6px;
+  text-transform: lowercase;
+}
+
+/* ───────────────────────────── divider */
+.divider {
+  height: 1px;
+  margin: 5px 2px 4px;
+  background: var(--divider);
+}
+
+/* ───────────────────────────── usage */
+.usage {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 8px;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 1.4px;
+  color: var(--usage-fg);
+  text-transform: uppercase;
+  padding: 0 2px;
+  opacity: 0.85;
+}
+.bar {
+  height: 4px;
+  border-radius: 4px;
+  background: var(--bar-track);
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--bar-fill);
+  border-radius: 4px;
+  transition: width 350ms ease-out, background 200ms linear;
+  box-shadow: var(--dot-glow, none) color-mix(in srgb, var(--bar-fill) 50%, transparent);
+}
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* ───────────────────────────── drag cursor */
+body.draggable, body.draggable .wrap, body.draggable .wrap *:not(.ctx-menu):not(.ctx-menu *) {
+  cursor: move;
+}
+body.dragging, body.dragging * {
+  cursor: move !important;
+  /* Disable text selection during drag so cursor doesn't flicker to I-beam. */
+  user-select: none;
+}
+
+/* Context menu now native Win32 (TrackPopupMenu) — no DOM, no CSS needed. */
+
+/* ───────────────────────────── gif */
+.gif-wrap { margin-top: 8px; }
+.gif {
+  width: 100%;
+  display: block;
+  border-radius: 14px;
+  box-shadow: var(--gif-shadow);
+  /* Pixel-art is nearest-neighbor; preserve sharp edges across DPI scaling. */
+  image-rendering: pixelated;
+}

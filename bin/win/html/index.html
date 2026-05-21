@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en" data-skin="waifu" data-theme="light">
+<head>
+<meta charset="utf-8">
+<title>cube overlay</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+<div id="root" data-skin="waifu" data-theme="light">
+  <div class="wrap">
+    <div class="brand">
+      <span>cube</span>
+      <span class="brand-sub" id="sess-count">0</span>
+    </div>
+    <div class="rows" id="rows"></div>
+    <div class="divider"></div>
+    <div class="usage" id="usage-row" hidden>
+      <span>Use</span>
+      <div class="bar"><div class="bar-fill" id="bar-fill"></div></div>
+      <span id="usage-pct" class="tabular">0%</span>
+    </div>
+    <div class="gif-wrap" id="gif-wrap" hidden>
+      <img class="gif" id="gif" alt="">
+    </div>
+  </div>
+</div>
+<script src="overlay.js"></script>
+</body>
+</html>
