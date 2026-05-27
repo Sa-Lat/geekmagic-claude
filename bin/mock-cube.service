@@ -1,10 +1,10 @@
 [Unit]
-Description=Mock Geekmagic cube — local HTTP server for cube-overlay
+Description=Cube-entity backend — local HTTP aggregator for the overlay
 
 [Service]
 Type=simple
 EnvironmentFile=-%h/.config/cube/config
-ExecStart=/usr/bin/python3 %h/.claude/bin/mock-cube.py --assets %h/projects/cube/assets
+ExecStart=/usr/bin/python3 %h/.claude/bin/mock-cube.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

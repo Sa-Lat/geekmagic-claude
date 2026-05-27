@@ -1,13 +1,12 @@
-/* Mochi Classic — light + dark variants. Ports dir-mochi.jsx (39-280)
-   to plain CSS. Skin × theme palettes via custom properties; root has
-   data-skin + data-theme attributes that JS swaps at runtime. */
+/* Cube-entity overlay — Mochi Classic light + dark.
+   Single skin, palette swapped via :root[data-theme=...]. */
 
 html, body {
   margin: 0;
   padding: 0;
-  /* Window is opaque (transparent=True breaks under WebView2's
-     layered-window compositing). Body bg = card so the rectangular
-     window edges blend seamlessly with the inner card area. */
+  /* Window is opaque (transparent=True breaks under WebView2's layered-window
+     compositing). Body bg = card so the rectangular window edges blend
+     seamlessly with the inner card area. */
   background: var(--card);
   font-family: 'Quicksand', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -17,133 +16,18 @@ html, body {
 }
 
 /* Wrap fills the window width; height = content. ResizeObserver in
-   overlay.js watches .wrap height and reports up to Python so the
-   OS window shrinks to fit (no black space below content). */
+   overlay.js watches .wrap height and reports up to Python so the OS window
+   shrinks to fit (no black space below content). */
 #root, .wrap {
   width: 100%;
 }
 
 /* ───────────────────────────── palette tokens
-   Defined on `:root` (= html) so body's `background: var(--card)`
-   resolves — otherwise card-coloured space below content would fall
-   through to the WebView2 canvas / window BackColor. */
-:root {
-  /* defaults overwritten by data-skin/data-theme combos below */
-  --card:      #fbe9f1;
-  --text:      #4a1834;
-  --meta:      #7a4866;
-  --brand:     #a8326a;
-  --brand-sub: #b88098;
-  --divider:   #f2d0e0;
-  --bar-track: #f2d0e0;
-  --bar-fill:  #ff5ba1;
-  --usage-fg:  #8a2862;
-  --subline:   #a07490;
-  --gif-shadow: 0 3px 10px rgba(140,60,100,0.20);
-  --card-shadow:
-    0 1px 0 rgba(255,255,255,0.75) inset,
-    0 -1px 0 rgba(160,60,110,0.08) inset,
-    0 6px 16px rgba(160,60,120,0.16);
-  --dot-glow: none;  /* dark mode adds an outer glow */
-  /* cube-skin canvas chrome — overridden in cube×dark for cyan glow */
-  --entity-bg: #000;
-  --entity-shadow: 0 3px 10px rgba(0,0,0,0.25);
-}
-
-/* waifu × light (default) */
-:root[data-skin="waifu"][data-theme="light"] {
-  --acc-permission: #ff4a96;
-  --acc-thinking:   #a875e0;
-  --acc-done:       #5fa83f;
-  --acc-idle:       #bd9fb1;
-  --acc-error:      #ff5a72;
-  --acc-compact:    #c060d8;
-  --acc-alert:      #ff8c4a;
-  --acc-start:      #7a8cff;
-}
-
-/* waifu × dark */
-:root[data-skin="waifu"][data-theme="dark"] {
-  --card:      #2a1226;
-  --text:      #ffe5f2;
-  --meta:      #d99eba;
-  --brand:     #ff8ec8;
-  --brand-sub: #a86b88;
-  --divider:   #4a1834;
-  --bar-track: #3a0f28;
-  --bar-fill:  #ff5ba1;
-  --usage-fg:  #ff8ec8;
-  --subline:   #b88098;
-  --gif-shadow: 0 4px 12px rgba(0,0,0,0.5);
-  --card-shadow:
-    0 1px 0 rgba(255,255,255,0.05) inset,
-    0 -1px 0 rgba(0,0,0,0.4) inset,
-    0 6px 18px rgba(0,0,0,0.5);
-  --dot-glow: 0 0 6px;
-  --acc-permission: #ff5ba1;
-  --acc-thinking:   #c08cf0;
-  --acc-done:       #7fce5a;
-  --acc-idle:       #a08090;
-  --acc-error:      #ff7088;
-  --acc-compact:    #d078e8;
-  --acc-alert:      #ffa060;
-  --acc-start:      #9aa8ff;
-}
-
-/* orb × light */
-:root[data-skin="orb"][data-theme="light"] {
-  --card:      #ece3f5;
-  --text:      #311566;
-  --meta:      #5a4a88;
-  --brand:     #5a3aa8;
-  --brand-sub: #8472c0;
-  --divider:   #dcd0ec;
-  --bar-track: #dcd0ec;
-  --bar-fill:  #7458d6;
-  --usage-fg:  #4b2a96;
-  --subline:   #7a6ca8;
-  --acc-permission: #ff5ba1;
-  --acc-thinking:   #7458d6;
-  --acc-done:       #5fa83f;
-  --acc-idle:       #8e7fb8;
-  --acc-error:      #ff5a72;
-  --acc-compact:    #a04ed8;
-  --acc-alert:      #ff8c4a;
-  --acc-start:      #5870e0;
-}
-
-/* orb × dark */
-:root[data-skin="orb"][data-theme="dark"] {
-  --card:      #1c1535;
-  --text:      #ebe3ff;
-  --meta:      #a89dd0;
-  --brand:     #b59cff;
-  --brand-sub: #7e6cad;
-  --divider:   #2a1d4d;
-  --bar-track: #231642;
-  --bar-fill:  #9b85ff;
-  --usage-fg:  #b59cff;
-  --subline:   #9a8ec0;
-  --gif-shadow: 0 4px 12px rgba(0,0,0,0.5);
-  --card-shadow:
-    0 1px 0 rgba(255,255,255,0.05) inset,
-    0 -1px 0 rgba(0,0,0,0.4) inset,
-    0 6px 18px rgba(0,0,0,0.5);
-  --dot-glow: 0 0 6px;
-  --acc-permission: #ff7eb8;
-  --acc-thinking:   #9b85ff;
-  --acc-done:       #7fce5a;
-  --acc-idle:       #8e7fb8;
-  --acc-error:      #ff7088;
-  --acc-compact:    #b890ee;
-  --acc-alert:      #ffa060;
-  --acc-start:      #7e90ff;
-}
-
-/* cube × light — voxel entity skin. Cyan-accented chrome leans toward
-   the entity's core hue (cyan 188°) so the canvas reads as part of the
-   card instead of an inset. */
-:root[data-skin="cube"][data-theme="light"] {
+   Light is the default; dark overrides via `data-theme="dark"`. Cyan accents
+   lean toward the entity's core hue (cyan 188°) so the canvas reads as part
+   of the card instead of an inset. */
+:root,
+:root[data-theme="light"] {
   --card:      #e6eef2;
   --text:      #0f2a36;
   --meta:      #3f6478;
@@ -154,6 +38,9 @@ html, body {
   --bar-fill:  #1aa4c4;
   --usage-fg:  #064a60;
   --subline:   #406878;
+  --dot-glow: none;
+  --entity-bg: #000;
+  --entity-shadow: 0 3px 10px rgba(0,0,0,0.25);
   --acc-permission: #d54590;
   --acc-thinking:   #1aa4c4;
   --acc-done:       #4a9c3a;
@@ -164,10 +51,7 @@ html, body {
   --acc-start:      #4a78d6;
 }
 
-/* cube × dark — the entity's natural habitat. Near-black card so the
-   canvas's own dark background blends with the chrome and the core
-   glow reads as the brightest thing on screen. */
-:root[data-skin="cube"][data-theme="dark"] {
+:root[data-theme="dark"] {
   --card:      #0d1015;
   --text:      #d8e8f0;
   --meta:      #88a0b0;
@@ -178,11 +62,6 @@ html, body {
   --bar-fill:  #5ce7ff;
   --usage-fg:  #5ce7ff;
   --subline:   #6a8898;
-  --gif-shadow: 0 4px 12px rgba(0,0,0,0.5);
-  --card-shadow:
-    0 1px 0 rgba(255,255,255,0.04) inset,
-    0 -1px 0 rgba(0,0,0,0.4) inset,
-    0 6px 18px rgba(0,0,0,0.5);
   --dot-glow: 0 0 6px;
   --entity-bg: #05070b;
   --entity-shadow: 0 4px 14px rgba(0,200,240,0.10);
@@ -201,8 +80,8 @@ html, body {
   box-sizing: border-box;
   padding: 12px;
   background: var(--card);
-  /* Inset-only shadow — outer drop shadow is invisible against the
-     opaque window edge (window itself is the card). */
+  /* Inset-only shadow — outer drop shadow is invisible against the opaque
+     window edge (window itself is the card). */
   box-shadow:
     0 1px 0 rgba(255,255,255,0.75) inset,
     0 -1px 0 rgba(160,60,110,0.08) inset;
@@ -210,8 +89,8 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  /* container-type lets `@container` rules below shrink text when the
-     card is at Small (140 px) without hard-coded breakpoints. */
+  /* container-type lets `@container` rules below shrink text when the card
+     is at Small (140 px) without hard-coded breakpoints. */
   container-type: inline-size;
 }
 
@@ -260,14 +139,12 @@ html, body {
   border-radius: 50%;
   background: var(--acc);
   position: relative;
-  /* Static halo per designer: `0 0 0 3px ${color}22` (~13% alpha). */
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 22%, transparent);
 }
 
-/* `--acc` per state, driven by attribute (not inline style). Chained
-   var() through inline-set custom-property occasionally fails to
-   re-resolve on data-skin/data-theme attribute swaps — using a
-   plain CSS rule sidesteps that bug entirely. */
+/* `--acc` per state, driven by attribute (not inline style). Chained var()
+   through inline-set custom-property occasionally fails to re-resolve on
+   data-theme attribute swaps — plain CSS rules sidestep that. */
 .dot[data-state="permission"] { --acc: var(--acc-permission); }
 .dot[data-state="thinking"]   { --acc: var(--acc-thinking); }
 .dot[data-state="done"]       { --acc: var(--acc-done); }
@@ -277,10 +154,10 @@ html, body {
 .dot[data-state="alert"]      { --acc: var(--acc-alert); }
 .dot[data-state="start"]      { --acc: var(--acc-start); }
 
-/* Sonar-style ripple via pseudo-element: a sharp ring grows 0 → 8 px
-   outward and fades to transparent over the first 60 % of the cycle,
-   then rests transparent for the remaining 40 %. Decouples the
-   animation from the dot's own static halo so the two never compete. */
+/* Sonar-style ripple via pseudo-element: a sharp ring grows 0 → 8 px outward
+   and fades to transparent over the first 60 % of the cycle, then rests
+   transparent for the remaining 40 %. Decouples the animation from the dot's
+   static halo so the two never compete. */
 .dot[data-live="true"]::after {
   content: "";
   position: absolute;
@@ -290,15 +167,9 @@ html, body {
   pointer-events: none;
 }
 @keyframes dot-ripple {
-  0% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--acc) 75%, transparent);
-  }
-  60% {
-    box-shadow: 0 0 0 8px color-mix(in srgb, var(--acc) 0%, transparent);
-  }
-  100% {
-    box-shadow: 0 0 0 8px color-mix(in srgb, var(--acc) 0%, transparent);
-  }
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--acc) 75%, transparent); }
+  60%  { box-shadow: 0 0 0 8px color-mix(in srgb, var(--acc) 0%, transparent); }
+  100% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--acc) 0%, transparent); }
 }
 .cwd {
   overflow: hidden;
@@ -326,12 +197,9 @@ html, body {
 }
 
 /* ───────────────────────────── subline (session label)
-   Shown only on rows whose cwd appears more than once in the current
-   sessions list. label = first user message (same identifier
-   claude --resume shows). Indented to start under the cwd column
-   (dot + gap = 15 px) so it visually 'belongs' to its row. Inherits
-   Quicksand from body (prose, not technical ids — sans-serif reads
-   better than monospace for human text). */
+   Shown only on rows whose cwd appears more than once in the current sessions
+   list. label = first user message (same identifier `claude --resume` shows).
+   Indented to start under the cwd column so it visually 'belongs' to its row. */
 .subline {
   padding-left: 15px;
   padding-right: 10px;
@@ -388,28 +256,14 @@ body.draggable, body.draggable .wrap, body.draggable .wrap *:not(.ctx-menu):not(
 }
 body.dragging, body.dragging * {
   cursor: move !important;
-  /* Disable text selection during drag so cursor doesn't flicker to I-beam. */
   user-select: none;
 }
 
-/* Context menu now native Win32 (TrackPopupMenu) — no DOM, no CSS needed. */
-
-/* ───────────────────────────── gif */
-.gif-wrap { margin-top: 8px; }
-.gif {
-  width: 100%;
-  display: block;
-  border-radius: 14px;
-  box-shadow: var(--gif-shadow);
-  /* Pixel-art is nearest-neighbor; preserve sharp edges across DPI scaling. */
-  image-rendering: pixelated;
-}
-
-/* ───────────────────────────── entity (cube skin)
-   DPR-aware canvas — JS owns intrinsic px (size × devicePixelRatio);
-   width:100% stretches CSS box to card-inner width, 1:1 aspect via the
-   square canvas. No image-rendering: pixelated — entity is anti-aliased
-   polygons, not pixel-art (smoothing keeps edges crisp). */
+/* ───────────────────────────── entity (canvas voxel cube)
+   DPR-aware canvas — JS owns intrinsic px (size × devicePixelRatio); width
+   100 % stretches CSS box to card-inner width, 1:1 aspect via the square
+   canvas. No image-rendering: pixelated — entity is anti-aliased polygons,
+   not pixel-art. */
 .entity-wrap {
   margin-top: 8px;
   border-radius: 14px;

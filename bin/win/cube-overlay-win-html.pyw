@@ -25,7 +25,6 @@ Per-machine config lives under %APPDATA%\cube\ (shared with the Tk
 variant — same overlay.env and overlay-layouts.json keys).
 """
 import argparse
-import base64
 import ctypes
 import json
 import os
@@ -209,11 +208,10 @@ TPM_RIGHTBUTTON = 0x0002
 # Menu item IDs (kept ≥100 to stay clear of common WM_COMMAND territory).
 MENU_IDS = {
     "theme_light": 100, "theme_dark": 101,
-    "skin_orb": 110, "skin_waifu": 111, "skin_cube": 112,
     "pos_lock": 120, "pos_reset": 121,
     "size_140": 130, "size_180": 131, "size_240": 132,
     "win_topmost": 140, "win_lift": 141, "win_front": 142,
-    "win_gif": 143,
+    "win_entity": 143,
     "hide": 150, "quit": 151,
 }
 
@@ -391,7 +389,7 @@ class JsApi:
         self.topmost = env.get("CUBE_OVERLAY_TOPMOST", "1") == "1"
         self.lift_on_activity = env.get(
             "CUBE_OVERLAY_LIFT_ON_ACTIVITY", "0") == "1"
-        self.hide_gif = env.get("CUBE_OVERLAY_HIDE_GIF", "0") == "1"
+        self.hide_entity = env.get("CUBE_OVERLAY_HIDE_ENTITY", "0") == "1"
         # runtime (set after window creation)
         self.hwnd = None
         self.window = None
@@ -439,7 +437,7 @@ class JsApi:
             return None
         d["theme"] = self.theme  # JS uses this to set data-theme
         d["locked"] = self.locked  # JS uses to gate drag UX
-        d["hide_gif"] = self.hide_gif  # JS hides .gif-wrap + .divider when on
+        d["hide_entity"] = self.hide_entity  # JS hides the entity canvas + divider when on
         state = d.get("state")
         # Auto-unhide if user-hidden and state differs from hide_winner.
         if self.hidden_by_user and state != self.hide_winner and self.window:
@@ -457,15 +455,6 @@ class JsApi:
         self.last_winner = state
         return d
 
-    def gif(self):
-        try:
-            with urllib.request.urlopen(
-                f"{self.mock_url}/current.gif", timeout=2) as r:
-                return base64.b64encode(r.read()).decode("ascii")
-        except Exception as e:
-            sys.stderr.write(f"gif fetch failed: {e}\n")
-            return None
-
     # ── bootstrap for JS ────────────────────────────────────────────────
     def initial_state(self):
         return {
@@ -474,7 +463,7 @@ class JsApi:
             "locked": self.locked,
             "topmost": self.topmost,
             "lift": self.lift_on_activity,
-            "hide_gif": self.hide_gif,
+            "hide_entity": self.hide_entity,
             "size_presets": list(SIZE_PRESETS),
         }
 
@@ -484,18 +473,6 @@ class JsApi:
             return None
         self.theme = name
         write_overlay_env({"CUBE_OVERLAY_THEME": name})
-        return name
-
-    def set_skin(self, name):
-        """Route through mock-cube's /set?skin=NAME — proxies to
-        `cube.sh skin NAME` + `cube.sh redisplay` in WSL. Next poll
-        picks up the new skin from /dashboard.json."""
-        try:
-            with urllib.request.urlopen(
-                f"{self.mock_url}/set?skin={name}", timeout=2) as r:
-                r.read()
-        except Exception as e:
-            sys.stderr.write(f"set_skin({name}) failed: {e}\n")
         return name
 
     def set_size(self, w):
@@ -542,11 +519,11 @@ class JsApi:
                            "1" if self.lift_on_activity else "0"})
         return self.lift_on_activity
 
-    def set_hide_gif(self, on):
-        self.hide_gif = bool(on)
-        write_overlay_env({"CUBE_OVERLAY_HIDE_GIF":
-                           "1" if self.hide_gif else "0"})
-        return self.hide_gif
+    def set_hide_entity(self, on):
+        self.hide_entity = bool(on)
+        write_overlay_env({"CUBE_OVERLAY_HIDE_ENTITY":
+                           "1" if self.hide_entity else "0"})
+        return self.hide_entity
 
     # ── window-management ───────────────────────────────────────────────
     def _bring_to_front_async(self):
@@ -631,12 +608,10 @@ class JsApi:
         user32 = ctypes.windll.user32
         ck_theme_l = MF_CHECKED if self.theme == "light" else 0
         ck_theme_d = MF_CHECKED if self.theme == "dark" else 0
-        # Skin is server-driven (mock-cube). We can't know "current" skin
-        # reliably without a poll — just show both without check marks.
         ck_lock = MF_CHECKED if self.locked else 0
         ck_top = MF_CHECKED if self.topmost else 0
         ck_lift = MF_CHECKED if self.lift_on_activity else 0
-        ck_gif = MF_CHECKED if not self.hide_gif else 0  # "Show GIF" — checked = visible
+        ck_entity = MF_CHECKED if not self.hide_entity else 0  # "Show Animation" — checked = visible
         ck_w140 = MF_CHECKED if self.width == 140 else 0
         ck_w180 = MF_CHECKED if self.width == 180 else 0
         ck_w240 = MF_CHECKED if self.width == 240 else 0
@@ -645,11 +620,6 @@ class JsApi:
         theme_m = self._mk_submenu([
             (ck_theme_l, M["theme_light"], "Light", 0),
             (ck_theme_d, M["theme_dark"], "Dark", 0),
-        ])
-        skin_m = self._mk_submenu([
-            (0, M["skin_orb"], "orb", 0),
-            (0, M["skin_waifu"], "waifu", 0),
-            (0, M["skin_cube"], "cube", 0),
         ])
         pos_m = self._mk_submenu([
             (ck_lock, M["pos_lock"], "Locked", 0),
@@ -663,12 +633,11 @@ class JsApi:
         win_m = self._mk_submenu([
             (ck_top, M["win_topmost"], "Always on Top", 0),
             (ck_lift, M["win_lift"], "Lift on Activity", 0),
-            (ck_gif, M["win_gif"], "Show Animation", 0),
+            (ck_entity, M["win_entity"], "Show Animation", 0),
             (0, M["win_front"], "Bring to Front", 0),
         ])
         root_m = self._mk_submenu([
             (0, 0, "Theme", theme_m),
-            (0, 0, "Skin", skin_m),
             (0, 0, "Position", pos_m),
             (0, 0, "Size", size_m),
             (0, 0, "Window", win_m),
@@ -698,12 +667,6 @@ class JsApi:
             self.set_theme("light")
         elif cmd_id == M["theme_dark"]:
             self.set_theme("dark")
-        elif cmd_id == M["skin_orb"]:
-            self.set_skin("orb")
-        elif cmd_id == M["skin_waifu"]:
-            self.set_skin("waifu")
-        elif cmd_id == M["skin_cube"]:
-            self.set_skin("cube")
         elif cmd_id == M["pos_lock"]:
             self.set_lock(not self.locked)
         elif cmd_id == M["pos_reset"]:
@@ -718,8 +681,8 @@ class JsApi:
             self.set_topmost(not self.topmost)
         elif cmd_id == M["win_lift"]:
             self.set_lift(not self.lift_on_activity)
-        elif cmd_id == M["win_gif"]:
-            self.set_hide_gif(not self.hide_gif)
+        elif cmd_id == M["win_entity"]:
+            self.set_hide_entity(not self.hide_entity)
         elif cmd_id == M["win_front"]:
             self.bring_to_front()
         elif cmd_id == M["hide"]:

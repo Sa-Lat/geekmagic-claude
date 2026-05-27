@@ -4,109 +4,195 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-Bash-and-curl glue that turns a GeekMagic SmallTV-Ultra (ESP8266, 240×240 IPS) into a live status display for Claude Code itself. Claude Code hooks (`SessionStart`, `SessionEnd`, `UserPromptSubmit`, `Stop`, `Notification`, `PermissionRequest`, `PostToolUseFailure`, `PreCompact` — see synergy table below) shell out to `bin/cube.sh <state>`, which fires a `GET /set?img=/image/<state>.gif` at the device. No daemon, no server — pure HTTP from hook to firmware.
+Claude-Code multi-session overlay with a voxel cube-entity animation. Claude
+Code hooks (`SessionStart`, `SessionEnd`, `UserPromptSubmit`, `Stop`,
+`Notification`, `PermissionRequest`, `PostToolUseFailure`, `PreCompact` —
+mapping table below) shell out to `bin/cube.sh <state>`, which writes a
+per-session record into a shared JSON file. A local HTTP service
+(`mock-cube.py`) aggregates the active sessions by priority and exposes
+`/dashboard.json`. A frameless WebView2 overlay on the Windows host polls
+that endpoint and renders the winning state as one of 8 emotions on a vanilla
+JS `<canvas>` entity.
 
-The README is in German; this file is the English working reference.
+No hardware. No GIFs. No background daemons except mock-cube. The whole
+runtime is `cube.sh` (single bash script) + `mock-cube.py` (single Python
+stdlib HTTP server) + a Windows-native overlay (`cube-overlay-win-html.pyw`
+with pywebview/WebView2).
 
-## Architecture, in five pieces
+## Architecture, three pieces
 
-1. **`bin/cube.sh`** — the only runtime component. Single bash script that hooks invoke. Designed to never block Claude: 2s curl timeout, swallows all errors, always `exit 0`. **Multi-session aware:** reads `session_id` + `cwd` from hook stdin JSON (single python3 inline call in `parse_hook` — no jq), tracks per-session state in `/tmp/.cube-sessions-$UID.json` (atomic via flock + python3 + temp+rename), and aggregates across sessions by priority: `permission > error > compact > done > thinking > alert > start > idle`. Per-session `seq` counter makes auto-revert TOCTOU-safe — a stale revert never stomps an active session. **Revert target:** `alert`/`error`/`compact`/`permission` restore the session's `prev_state` (last stable thinking/idle, captured on transient entry) so a Bash failure during thinking returns to thinking, not idle. `done`/`start` revert to `idle` hardcoded — they represent task-ended / session-greeting. **Recap suppression:** the `Stop` hook fires right after a `PreCompact` recap message; if `done` lands within `CUBE_RECAP_WINDOW`s (default 60) of the session's last `compact`, the mutation is skipped — no seq bump, no push, no revert — so the existing `compact → prev_state` revert handles the return cleanly without a `done` blip in between. The compact-timestamp on the session is cleared on the next real `thinking`. Set `CUBE_RECAP_WINDOW=0` to disable. **Error debounce:** `PostToolUseFailure` fires the instant a Bash tool fails, but Claude usually retries successfully in the same turn — without debounce the user sees `error.gif` flash for an issue that resolved itself. `CUBE_ERROR_GRACE` (default 3s) defers the entire error mutate+push+revert; any non-error state for the same session (or `SessionEnd`) during the window drops the pending entry — silent no-op, no seq bump, prev_state never disturbed. Persistent errors materialize after grace, then follow the normal `ERROR_REVERT → @prev` flow. Pending entries live in `/tmp/.cube-pending-errors-$UID.json` keyed by sid with a `ts` token, so re-armed errors invalidate old deferred jobs by ts-mismatch rather than coordination. Set `CUBE_ERROR_GRACE=0` to disable. Stale sessions (>`CUBE_SESSION_TTL`s, default 3600) pruned on every write. Idle sessions additionally drop at `CUBE_IDLE_TTL`s (default 600) so crashed Claude instances that never fired SessionEnd don't linger an hour in the overlay — they get caught at the shorter idle-specific threshold while active state-changes (which bump `ts`) stay alive on the unified TTL. Set `CUBE_IDLE_TTL=0` to disable the idle-specific prune. **Skins** (`orb` / `waifu`) are a client-side selector stored in `~/.claude/.cube-skin`; locally each skin's source GIFs live in `assets/<skin>/`, on the cube they coexist as flat files using the legacy prefix convention (orb keeps unprefixed names, others get `<skin>_<state>.gif`).
-2. **Asset pipeline** — pixel-art source GIFs from PixelLab.ai live in **per-skin subdirs**: `assets/<skin>/<state>.gif` (typically 128×128 or 256×256). `resize.sh` (gifsicle `--resize-method=sample`, nearest-neighbor) normalizes them to 240×240 in `assets/240/<skin>/<state>.gif`. `upload.sh` then POSTs multipart to `/doUpload?dir=/image/` and **translates the filename** — orb files upload as `<state>.gif` (no prefix, legacy), others as `<skin>_<state>.gif` — because the firmware does not navigate subdirectories under `/image/`. Sample-resize is deliberate — pixel art must not be smoothed. `bin/contrast-fix.py` (Pillow Sat/Con/Sharp per-frame + no-dither quantize) optionally rescues 1-2px dark detail (eyebrows, eyelashes) from cube-quantization loss in mono-palette skins like `waifu`. Asset-prompt docs per skin live in `prompts/` (`waifu-skin.md`). **Desktop-only overrides:** `assets/desktop/<skin>/<state>.gif` is a parallel hi-res layer for the overlay — no size/frame/quantization limits (typical 256×256, 7–16 frames). `mock-cube.py:resolve_local()` probes `assets/desktop/<skin>/` before falling back to `assets/<skin>/`, so the overlay automatically renders the smoother variant when present. `resize.sh`/`upload.sh` skip the `desktop/` dir by name — these files never reach the cube. Per-state, partial coverage is fine: missing entries fall through to the cube source (same filenames).
-3. **Deploy** — `deploy.sh` copies `bin/cube.sh`, `bin/cube-gen.py`, `bin/cube-watchdog.sh`, `bin/mock-cube.py`, and `bin/cube-overlay.py` into `~/.claude/bin/` where the hooks reference them, and installs `cube-watchdog.service` + `mock-cube.service` + `cube-overlay.service` into `~/.config/systemd/user/`. The repo is the source of truth; the deployed files are artifacts.
-4. **Watchdog** — `bin/cube-watchdog.sh` is an optional long-running process that polls cube reachability every 15 s and calls `cube.sh redisplay` on offline → online transitions, so the cube returns to a Claude-driven state (or `idle`) after a firmware reboot/crash. Install via the shipped systemd --user unit (`bin/cube-watchdog.service`) or `nohup`. The `redisplay` subcommand reads the sessions map and pushes the current aggregated winner without mutating session state — safe to call from cron, watchdogs, or after manual recovery.
-5. **Dev mode without hardware** — `bin/mock-cube.py` is a stdlib HTTP server that mimics the cube's endpoints; `bin/cube-overlay.py` is a frameless Tk window (WSLg-friendly) that polls the mock and shows the active state's raw PixelLab GIF on the desktop, always-on as an ambient display (idle no longer hides it). Multi-session: renders one block per active Claude session (emoji + cwd + age) above the GIF, with per-skin × theme palette for dark/light mode. Right-click menu: Theme / Skin / Position / Size / Hide / Quit. **WSLg topmost limitation:** WSLg renders each X11 client as a separate Win32 window via RDP; `wm_attributes("-topmost")` translates to `HWND_TOPMOST` which always steals focus, while `focusmodel("passive")` / `<Visibility>` events stay Linux-side and don't propagate. The overlay sets topmost once at init + binds `<Visibility>` for best-effort re-lift, trading absolute always-on-top for no focus-steal. README troubleshooting section has the full WSLg note. Overlay resamples GIFs to `args.size` with PIL `Image.LANCZOS` (high-quality sinc filter) — smoother than NEAREST for the hi-res `assets/desktop/<skin>/` overrides; the cube-pipeline's `gifsicle --resize-method=sample` remains nearest because firmware quantization benefits from crisp pixel boundaries. cube.sh fans every state-mutation to `$CUBE_IP` **and** every host in `$CUBE_MIRROR` (comma-separated), so once `CUBE_MIRROR=127.0.0.1:8765` is set in `~/.config/cube/config`, the overlay shows hook activity whether the real cube is reachable (home) or not (office) — no config change between locations. Install via `make dev-install` (systemd --user units mirror the watchdog pattern). The mock-cube unit loads `~/.config/cube/config` via `EnvironmentFile=-…` so plan-specific overrides (see below) reach the subprocess; systemd --user PATH excludes nvm so mock-cube scans `~/.nvm/versions/node/*/bin/npx` as fallback and injects that directory into the ccusage subprocess PATH (npx shebang resolves `node` via PATH). Per-machine overlay settings live in `~/.config/cube/overlay.env`, written atomically by the right-click menu and the drag handler:
-- `CUBE_OVERLAY_WIDTH` (140/180/240) drives Small/Medium/Large; `CUBE_OVERLAY_SIZE` is GIF edge length (0/unset auto-fits to width).
-- `CUBE_OVERLAY_THEME` (`dark`/`light`), `CUBE_OVERLAY_POSITION_LOCKED` (1/0), `CUBE_OVERLAY_MAX_BLOCKS` (default 5).
-- `CUBE_OVERLAY_RESET_R` / `_B` — **deprecated** override for the Reset menu's landing anchor. Default is now the current layout's primary-monitor bottom-right; set these only if you need a different home anchor across all layouts (kept one release for backwards-compat).
+1. **`bin/cube.sh`** — Claude-Code hook receiver + per-session state machine.
+   Designed to never block Claude: every error path silently exits 0.
+   Multi-session aware: reads `session_id` + `cwd` from hook stdin JSON
+   (single python3 inline call in `parse_hook` — no jq), tracks per-session
+   state in `/tmp/.cube-sessions-$UID.json` (atomic via flock + python3 +
+   temp+rename), and aggregates across sessions by priority:
+   `permission > error > compact > done > thinking > alert > start > idle`.
+   Per-session `seq` counter makes auto-revert TOCTOU-safe.
 
-**Windows-native overlay variant** — `bin/win/cube-overlay-win.pyw` (Tk) and `bin/win/cube-overlay-win-html.pyw` (pywebview/WebView2) are parallel implementations for Windows hosts that sidestep WSLg entirely. **Tk variant** is the long-running default — CPython + Tk run natively on Windows; the script resolves the WSL-distro IP at startup via `wsl.exe hostname -I` and polls `http://<wsl-ip>:8765/dashboard.json` + `/current.gif` directly — no `127.0.0.1`-forwarding, so Docker port binds on localhost can't conflict. `wslg_probe()`, `<Visibility>`-re-lift, and `focusmodel("passive")` are dropped; `-topmost` is respected natively without focus-steal. `detect_layout()` swaps xrandr for `user32.EnumDisplayMonitors` (ctypes); config lives under `%APPDATA%\cube\` mirroring `~/.config/cube/`. Skin is read from mock-cube's `/dashboard.json` `skin` field (mock-cube derives it from `STATE.img` via `derive_skin()`); skin-changes from the Windows menu route through `GET /set?skin=NAME` on mock-cube, which proxies to `~/.claude/bin/cube.sh skin NAME` + `cube.sh redisplay` so `~/.claude/.cube-skin` (WSL) stays the single source of truth. Theme/Position/Size remain menu-mutable; **Size is applied live** (font + GIF re-render + geometry, no process restart) because the Linux `restart_overlay()` pattern silently fails on Windows when argv[0] is a UNC path + pythonw.exe + DETACHED_PROCESS (observed on 3-monitor setups; the new pythonw never came up). `apply_size()` mutates `cur["win_w"]` / `cur["gif_size"]` / `cur["metrics"]` in place — all width/size-derived closures read through `cur` rather than capturing the init-time locals lexically. `restart_overlay()` is still used by `Reset Position` (rare path) but now passes `cwd=USERPROFILE` to dodge UNC-cwd inherit. `SetProcessDpiAwareness(2)` opts into per-monitor DPI scaling so Tk renders crisp on >100% scaling. Under pythonw.exe `sys.stderr` is NUL; the script redirects stderr to `%TEMP%\cube-overlay-win.log` at module load + installs `sys.excepthook` so silent startup crashes are debuggable. Autostart shipped: `bin/win/cube-overlay-win.cmd` — **copy** the `.cmd` into `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\` (NOT a `.lnk` shortcut pointing into `\\wsl.localhost\…` — Mark-of-the-Web triggers SmartScreen "unknown publisher" on every login; the copied `.cmd` is treated as local and runs silently); resolves `pythonw.exe` dynamically via `py -c "...pythonw.exe"` (works across Store / python.org / Python Install Manager layouts), uses `%USERNAME%` for the UNC path with `CUBE_OVERLAY_UNC` env-var override for distros where Linux user ≠ Windows user. Calls `pythonw.exe` directly (not `py`) because the py-launcher is console-subsystem and stays attached to its pythonw child until exit, leaving an invisible console in the taskbar. Signed installer remains out of scope. To use, mock-cube must bind on `0.0.0.0` (set `CUBE_MOCK_HOST=0.0.0.0` in `~/.config/cube/config`, default remains `127.0.0.1`).
+   **Revert target:** `alert`/`error`/`compact`/`permission` restore the
+   session's `prev_state` (last stable thinking/idle, captured on transient
+   entry) so a Bash failure during thinking returns to thinking, not idle.
+   `done`/`start` revert to `idle` hardcoded — they represent task-ended /
+   session-greeting.
 
-**HTML/WebView2 variant** — `bin/win/cube-overlay-win-html.pyw` renders the same overlay as a frameless WebView2 window driven by `bin/win/html/` (`index.html` + `overlay.css` + `overlay.js`). Same WSL-IP resolution, same `%APPDATA%\cube\overlay.env` + `overlay-layouts.json` (shared with the Tk variant — keys overlap), same `/set?skin=NAME` routing through mock-cube. Differences: (1) **Mochi Classic** design ported from `dir-mochi.jsx` — Quicksand font, rounded card, glow-dot session list, animated sonar-ripple on live states (`permission`/`error`/`compact`/`alert`/`thinking`), tinted usage bar with palette tokens per `skin × theme`. (2) Native Win32 popup menu via `TrackPopupMenu` instead of DOM context menu — submenus aren't clipped by the WebView2 frameless bounds (DOM menu hit `~180-240 px wide` clipping at Small/Medium presets). (3) Drag is JS-driven (`mousedown`/`mousemove`/`mouseup`) calling Python `start_drag`/`move_relative`/`end_drag` over the pywebview bridge — Python reads `GetCursorPos` each call rather than trusting `screenX/Y` from WebView2 (logical/physical pixel mismatch under per-monitor DPI). (4) Window height tracks content via `ResizeObserver` → `api.resize_height(h)`, bottom-right anchor stays pinned so the card "grows upward" when sessions appear. (5) `transparent=True` is disabled — EdgeChromium's layered-window compositing leaves the actual window invisible (DWM thumbnail shows the content, but the surface stays unpainted) on most pywebview builds; opaque window with body background = `var(--card)` makes the rectangular window edges blend visually with the rounded card. (6) HWND discovery: `pywebview.window.native.Handle.ToInt64()` first; on failure (its `__repr__` recurses through `AccessibilityObject` and blows the stack) falls back to `EnumWindows` filtered by PID. (7) HTML/CSS/JS are read from disk at startup and inlined into the document passed to `webview.create_window(html=...)` — WebView2 can't load `file://` from UNC paths (`\\wsl.localhost\...`), but pywebview's transient HTTP server handles inlined `html=` fine. **Setup:** `py -3.13 -m pip install --user pywebview` — pinned to 3.13 because pythonnet has no 3.14 wheels yet (`CUBE_OVERLAY_PY` env-var in the autostart `.cmd`/`.ps1` to override). Autostart wrappers `cube-overlay-win-html.cmd` + `cube-overlay-win-html.ps1` mirror the Tk variant's pattern (dynamic `pythonw.exe` resolution via py-launcher, `%USERNAME%`-defaulted UNC with `CUBE_OVERLAY_UNC_HTML` override). Per-skin/theme palette tokens live in `overlay.css` under `:root[data-skin=...][data-theme=...]` selectors; JS swaps both `data-skin` and `data-theme` on `<html>` so the cascade re-resolves cleanly. The Tk variant keeps the legacy compact dashboard look; the HTML variant is the modern visual track. Both stay supported.
+   **Recap suppression:** the `Stop` hook fires right after a `PreCompact`
+   recap message; if `done` lands within `CUBE_RECAP_WINDOW`s (default 60)
+   of the session's last `compact`, the mutation is skipped — the existing
+   `compact → prev_state` revert handles the return cleanly. Set
+   `CUBE_RECAP_WINDOW=0` to disable.
 
-**Per-layout positioning** (`~/.config/cube/overlay-layouts.json`): the bottom-right anchor that used to live in `overlay.env` as `CUBE_OVERLAY_ANCHOR_R/_B` is now keyed by monitor-layout fingerprint. `detect_layout()` parses `xrandr --listmonitors` into `mon{N}:WxH+X+Y,...` (sorted by x-offset, primary marked by xrandr's `*`). When `xrandr` is missing/parse-fails it degrades to `fallback:{sw}x{sh}` with the full virtual screen as implicit primary. On startup the overlay looks up the current fingerprint → uses that anchor if present + in bounds. Cache-miss falls through to (1) legacy `CUBE_OVERLAY_ANCHOR_R/_B` in env (migrated once into the current layout, then env keys cleared), (2) legacy `CUBE_OVERLAY_X/_Y`, (3) **centered on the layout's primary monitor**. Drag-end + Reset menu both write per-layout, so Dock/Undock or Home/Office gets remembered automatically — no manual env editing.
+   **Error debounce:** `PostToolUseFailure` fires the instant a Bash tool
+   fails, but Claude usually retries successfully in the same turn —
+   without debounce the user sees an error flash for an issue that resolved
+   itself. `CUBE_ERROR_GRACE` (default 3s) defers the mutate+revert;
+   any non-error state for the same session (or `SessionEnd`) during the
+   window drops the pending entry — silent no-op. Pending entries live in
+   `/tmp/.cube-pending-errors-$UID.json` keyed by sid with a `ts` token, so
+   re-armed errors invalidate old deferred jobs by ts-mismatch. Set
+   `CUBE_ERROR_GRACE=0` to disable.
 
-The overlay's `/dashboard.json` polling shows **one block per active Claude session** (emoji + cwd + age) sorted by mock-cube into two phases: every non-idle state (`permission`/`error`/`compact`/`done`/`thinking`/`alert`/`start`) by PRIO desc + age asc, then idle alphabetically by cwd at the bottom. The overlay then treats `idle`/`done`/`start` as "ageless" — no age suffix on the block, no per-second sig change, so they don't reshuffle on the tick even though they're in the sorted phase. Below the blocks: 5h-window token usage % (mock-cube spawns `ccusage blocks --json --active --token-limit max` in a background thread, caches the result for 30s in `_USAGE`, exposes via `/dashboard.json`; `null` while refreshing or if ccusage is unavailable). The percentage = `totalTokens / limit` where `limit` comes from `CUBE_USAGE_TOKEN_LIMIT` (env, set in `~/.config/cube/config`) if present, else ccusage's `tokenLimitStatus.limit` (= highest historical 5h block). Anthropic does not publish exact Max-plan token limits, so the env override is the only way to make the overlay match the Anthropic web dashboard — pick a value empirically (Max(5x) lands around 155M in practice, but YMMV). Color thresholds (<50 green / <80 yellow / ≥80 red) mirror `~/.claude/statusline-command.sh`.
+   Stale sessions (>`CUBE_SESSION_TTL`s, default 3600) pruned on every
+   write. Idle sessions additionally drop at `CUBE_IDLE_TTL`s (default 600)
+   so crashed Claude instances that never fired SessionEnd don't linger an
+   hour. Set `CUBE_IDLE_TTL=0` to disable.
 
-Hooks themselves are configured in `~/.claude/settings.json` outside this repo (README §"Claude-Code Hook-Setup" shows the JSON).
+2. **`bin/mock-cube.py`** — local HTTP aggregator. Stdlib
+   `ThreadingHTTPServer` exposing exactly one meaningful endpoint:
+   `/dashboard.json`. On each GET it reads `/tmp/.cube-sessions-$UID.json`
+   fresh, applies the same `SESSION_PRIO` map as `cube.sh` to pick the
+   winner, returns `{state, cwd, ts, usage_5h_pct, sessions}` as JSON. The
+   sessions list is split into two phases: every non-idle state by PRIO
+   desc + age asc, then idle alphabetically by cwd at the bottom.
 
-## Peon-ping synergy (audio sibling)
+   `usage_5h_pct` comes from `ccusage blocks --json --active --token-limit
+   max` (Anthropic 5h-window). mock-cube spawns ccusage in a daemon thread,
+   caches the result for 30s in `_USAGE`, returns `null` while refreshing
+   or if ccusage is unavailable. `CUBE_USAGE_TOKEN_LIMIT` (env) overrides
+   ccusage's historical-max heuristic with the Anthropic-plan-specific
+   value (Max(5x) ≈ 155M empirically).
 
-`~/.claude/hooks/peon-ping/` is the user's audio-notification system. It fires on the **same 8 hook points** the cube uses and uses a similar event taxonomy. The two are paired: every state the cube shows visually, peon-ping sounds for. When extending cube, **mirror peon-ping's coverage** rather than diverging — they share `~/.claude/settings.json`.
+   Bind defaults to `127.0.0.1:8765`. For the Windows overlay set
+   `CUBE_MOCK_HOST=0.0.0.0` so the WSL-host IP route works.
 
-Hook → cube subcommand → peon category:
+3. **`bin/win/cube-overlay-win-html.pyw`** + `bin/win/html/` —
+   Windows-native frameless WebView2 window driven by pywebview. Polls
+   `/dashboard.json` every 500 ms, renders rows + usage + voxel-cube
+   canvas. `cube-entity.js` is the renderer: 33 voxel cubes in 3
+   concentric rings with a cyan core, 8 emotions mapped from dashboard
+   states (`thinking→thinking`, `permission→listening`, `done→happy`,
+   `idle→idle`, `error→error`, `compact→focused`, `alert→surprised`,
+   `start→curious`). `setEmotion` swaps the config atomically with a
+   ~600 ms tween on color + radial-pulse envelope; motion-language params
+   (orbitSpeed, shake, flash) snap instantly because the eye latches onto
+   continuous change.
 
-| Hook | cube.sh arg | peon category |
-|---|---|---|
-| `SessionStart` | `start` (5s revert → idle; visual alias for done.gif) | `session.start` |
-| `SessionEnd` | `end` (evicts session_id) | cleanup |
-| `UserPromptSubmit` | `thinking` | `task.acknowledge` |
-| `Stop` | `done` (5s revert → idle) | `task.complete` |
-| `Notification` | `alert` (5s revert → prev_state) | (varies) |
-| `PermissionRequest` | `permission` (5s revert → prev_state; set `CUBE_PERMISSION_REVERT=0` for forever) | `input.required` |
-| `PostToolUseFailure` matcher `Bash` | `error` (5s revert → prev_state) | `task.error` |
-| `PreCompact` | `compact` (5s revert → prev_state) | `resource.limit` |
+   WebView2 can't load `file://` from UNC paths
+   (`\\wsl.localhost\...`), so the pyw inlines `overlay.css`,
+   `cube-entity.js`, and `overlay.js` into the `index.html` document at
+   startup and passes the resulting string as `html=...` to
+   `webview.create_window`. pywebview's transient HTTP server handles
+   inlined HTML fine.
 
-`gif_for` in `cube.sh` is **skin-aware**: the `waifu` skin has dedicated GIFs for all seven states (`waifu_permission.gif`, `waifu_error.gif`, `waifu_compact.gif`, `waifu_done.gif`). The `orb` skin still falls back — `permission|error|compact` all resolve to `alert.gif`. Distinct state labels matter regardless of asset: they keep the auto-revert background job from stomping a newer state with `idle` when reverts overlap. When adding dedicated orb assets, drop them next to the others and extend the waifu-branch of `gif_for` to cover orb as well.
+   Per-machine settings live in `%APPDATA%\cube\overlay.env`
+   (`CUBE_OVERLAY_THEME`, `_WIDTH`, `_POSITION_LOCKED`, `_HIDE_ENTITY`) +
+   `overlay-layouts.json` (per-monitor bottom-right anchor, written by
+   drag-end + Reset menu).
 
-When adding new states or hooks: only the eight `show`-routed states (`thinking|alert|permission|error|compact|done|idle|start`) and `end` touch the sessions map. `img`/`theme`/`brt`/`list`/`skin`/`info`/`ping` are session-agnostic passthroughs — don't route them through `update_session`. Manual invocations from a terminal map to session_id `cli`, which behaves like any other session.
+Hooks themselves are configured in `~/.claude/settings.json` outside this
+repo. Wire each hook to `~/.claude/bin/cube.sh <state>`:
 
-Peon-ping has features the cube does not (yet): runtime enable/disable toggle, per-category mute, pack rotation, IDE/path rules. Don't port these blindly — visual signal is binary in a way audio isn't. Add only if a real workflow asks.
-
-## CUBE_IP config lookup
-
-Every script resolves `CUBE_IP` in this order: env var → `~/.config/cube/config` → `<repo>/.env`. Missing value = hard error with the same message everywhere. When editing scripts, preserve this order — the deployed `cube.sh` runs from `~/.claude/bin/` so the `.env` fallback only works for local dev, not deployed.
+| Hook | cube.sh arg |
+|---|---|
+| `SessionStart` | `start` |
+| `SessionEnd` | `end` |
+| `UserPromptSubmit` | `thinking` |
+| `Stop` | `done` |
+| `Notification` | `alert` |
+| `PermissionRequest` | `permission` |
+| `PostToolUseFailure` matcher `Bash` | `error` |
+| `PreCompact` | `compact` |
 
 ## Common commands
 
 ```bash
-make ping              # is the cube reachable at $CUBE_IP?
-make info              # device version, theme, free space, current skin/state
-make status            # local assets/ + assets/240/ + remote /image/ listing
-make resize            # 128/256 → 240 per-skin (assets/<skin>/ → assets/240/<skin>/)
-                       # bin/resize.sh <skin> to scope to one skin
-make upload            # push assets/240/<skin>/*.gif to cube (flat, prefix-translated)
-                       # bin/upload.sh <skin> to scope to one skin
-make all               # resize + upload
-make deploy            # install cube.sh + cube-gen.py + watchdog + mock-cube + overlay to ~/.claude/bin/ + systemd units
-make cycle             # visual smoke-test: thinking → alert → idle (5s each)
-make clear-old         # dry-run cleanup (keeps thinking/alert/idle.gif)
-make clear-old FORCE=1 # actually delete
+make deploy           # install cube.sh + mock-cube.py + mock-cube.service to ~/.claude/
+make dev-install      # deploy + enable systemd --user mock-cube unit
+make mock             # foreground run of mock-cube.py (Ctrl-C to stop)
+
+bin/cube.sh thinking|alert|permission|error|compact|done|idle|start
+bin/cube.sh end       # evict current CLI session
+bin/cube.sh info      # live sessions + aggregated winner
 ```
 
-Direct cube control (also works deployed as `~/.claude/bin/cube.sh`):
+Direct dashboard read (also works deployed at `~/.claude/bin/`):
+
 ```bash
-bin/cube.sh thinking|alert|permission|error|compact|done|idle|start   # state GIFs (skin-aware)
-bin/cube.sh skin [orb|waifu]                  # get/set mascot
-bin/cube.sh img <file>                        # show arbitrary uploaded file
-bin/cube.sh theme <1-7>                       # 3 = Photo Album (what we need)
-bin/cube.sh brt <-10..100>                    # -10 = off
-bin/cube.sh info | list | ping
+curl -s http://127.0.0.1:8765/dashboard.json | jq .
 ```
-
-## Cube HTTP-API gotchas
-
-Firmware v9.0.40-ish. These work:
-- `GET /v.json`, `/app.json`, `/space.json`
-- `GET /filelist?dir=/image/` (returns HTML, parsed with grep in scripts)
-- `GET /set?img=/image/FILE`, `?theme=1..7`, `?brt=N`, `?reboot=1`
-- `GET /delete?file=/image/FILE`
-- `POST /doUpload?dir=/image/` (multipart, field `file`)
-
-These **all fail** on current firmware — don't bother adding features that use them: `/set?msg=`, `/set?note=`, `/set?cnt=`.
-
-Other gotchas:
-- "Auto Switch Themes" in the device web-UI will overwrite hook-set images. Must be disabled in the cube settings, not workaroundable in code.
-- Upload curl emits a "duplicate Content-Length" warning — firmware bug, upload succeeds anyway. Don't try to silence with `-f` cleverness.
-- GIF budget is soft: docs target ≤50 KB / ≤8 frames, but the cube has handled 100–160 KB / 12–18 frames per file in practice. Total `/image/` storage is ~3 MB — `make info` to check free space before bulk uploads, `make clear-old` to prune.
 
 ## When changing `cube.sh`
 
-- Keep it non-blocking. New states should follow the `show <label> <file>` pattern and write per-session state so auto-revert logic stays coherent.
-- Auto-revert delays are env-driven (`CUBE_{ALERT,PERMISSION,ERROR,COMPACT,DONE,START}_REVERT`); when adding a new revertable state, extend `schedule_revert` and the env list together rather than hard-coding a delay.
-- Revert target rule: interruptions of active work (`alert`/`error`/`compact`/`permission`) pass `@prev` to `schedule_revert` so the session resumes the last stable state (`thinking`/`idle`) captured in `prev_state`. End-of-task or greeting states (`done`/`start`) pass nothing — default `idle`. `prev_state` is captured in `mutate update`'s `TRANSIENT` branch; carries forward across chained transients (error → alert keeps thinking). When adding a new revertable state, decide which bucket it belongs to and wire the case in `show()` accordingly.
-- When adding a new skin: create `assets/<skin>/` with the seven state-named GIFs (or fewer + accept the alert.gif fallback like `orb`), extend both `prefix()` and the waifu-branch of `gif_for()`. `resize.sh` and `upload.sh` discover skins automatically by directory scan — no script change needed.
-- After editing, run `make deploy` — the live hook script is `~/.claude/bin/cube.sh`, not the repo copy.
+- Keep it non-blocking. New states should follow the `show <label>` pattern
+  and write per-session state so auto-revert logic stays coherent.
+- Auto-revert delays are env-driven (`CUBE_{ALERT,PERMISSION,ERROR,COMPACT,
+  DONE,START}_REVERT`); when adding a new revertable state, extend
+  `schedule_revert` and the env list together rather than hard-coding a delay.
+- Revert target rule: interruptions of active work
+  (`alert`/`error`/`compact`/`permission`) pass `@prev` to
+  `schedule_revert` so the session resumes the last stable state
+  (`thinking`/`idle`) captured in `prev_state`. End-of-task or greeting
+  states (`done`/`start`) pass nothing — default `idle`. `prev_state` is
+  captured in `mutate update`'s `TRANSIENT` branch; carries forward across
+  chained transients (error → alert keeps thinking).
+- After editing, run `make deploy` — the live hook script is
+  `~/.claude/bin/cube.sh`, not the repo copy.
+
+## When changing `mock-cube.py`
+
+- Keep `SESSION_PRIO` map in sync with `cube.sh`'s PRIO map — they need to
+  agree on the winner.
+- `/dashboard.json` is the only contract the overlay depends on. New fields
+  fine; renaming existing ones breaks the JS poll loop.
+- ccusage subprocess is intentionally async + cached. Don't make
+  `_read_usage_pct` block on the subprocess.
+
+## When changing the overlay (`bin/win/html/`)
+
+- `overlay.js` polls `pywebview.api.dashboard()` every `POLL_MS` (500).
+  Heavy work belongs in the JS — Python bridge is for OS-level things
+  (drag/menu/window).
+- `cube-entity.js` is self-contained (IIFE + window exports). Its
+  emotions are pruned to the 8 dashboard states; do not mix in editor-only
+  presets without confirming they map to a dashboard state.
+- Cube-entity tweens between emotions (~600 ms) by lerping color + radial-
+  pulse-envelope; motion-language params snap. If you add a new emotion,
+  decide which bucket each param belongs to.
+- All three assets (`overlay.css`, `cube-entity.js`, `overlay.js`) are
+  inlined by `cube-overlay-win-html.pyw` at startup. External `<script
+  src="…">` tags in `index.html` don't resolve under pywebview's
+  no-base-URL `html=` mode — they must inline through the pyw.
+
+## Peon-ping synergy (audio sibling)
+
+`~/.claude/hooks/peon-ping/` is the user's audio-notification system. It
+fires on the **same 8 hook points** the overlay uses and uses a similar
+event taxonomy. The two are paired: every state the overlay shows visually,
+peon-ping sounds for. When extending the overlay, **mirror peon-ping's
+coverage** rather than diverging — they share `~/.claude/settings.json`.
+
+Peon-ping has features the overlay does not (yet): runtime enable/disable
+toggle, per-category mute, pack rotation, IDE/path rules. Don't port these
+blindly — visual signal is binary in a way audio isn't. Add only if a real
+workflow asks.
 
 ## Requirements
 
-`bash`, `curl`, `python3` (hook payload parse + atomic JSON mutation), `flock` (concurrent hook locking), `gifsicle` (for resize). `python3-pil python3-requests` only if using `cube-gen.py` (placeholder generator, not part of normal flow). `python3-tk` + `python3-pil.imagetk` only for dev mode (`cube-overlay.py`). `node` + `npx` only if you want the overlay's usage line populated (mock-cube spawns `ccusage` on demand; absence simply leaves `usage_5h_pct=null` → overlay shows `Usage —`).
+`bash`, `curl`, `python3` (hook payload parse + atomic JSON mutation),
+`flock` (concurrent hook locking). `node` + `npx` only if you want the
+overlay's usage line populated (mock-cube spawns `ccusage` on demand;
+absence simply leaves `usage_5h_pct=null` → overlay shows `Use —`).
+
+Windows host: Python 3.13 + `pywebview` (pythonnet wheels not yet built
+for 3.14), WebView2-Runtime (preinstalled on Win11; otherwise via Edge or
+Edge-WebView2-Standalone-Installer).

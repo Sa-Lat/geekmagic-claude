@@ -1,11 +1,11 @@
 /* cube overlay — Mochi Classic render loop.
  *
- * Polls window.pywebview.api.dashboard() every POLL_MS, diffs against
- * last render, patches DOM. GIF fetched on (img,ts) change via
- * api.gif() which returns base64 (pywebview can't pass raw bytes).
+ * Polls window.pywebview.api.dashboard() every POLL_MS, diffs against last
+ * render, patches DOM. The voxel entity canvas is driven by cube-entity.js;
+ * one emotion per dashboard state.
  *
- * Falls back to embedded SAMPLE_DATA when pywebview API is absent so
- * you can preview the look by opening index.html in any browser.
+ * Falls back to embedded SAMPLE_DATA when pywebview API is absent so you
+ * can preview the look by opening index.html in any browser.
  */
 
 const POLL_MS = 500;
@@ -18,9 +18,7 @@ const STATE_LABELS = {
 };
 
 const SAMPLE_DATA = {
-  skin: "cube",
   state: "thinking",
-  img: null,
   ts: 0,
   usage_5h_pct: 42,
   sessions: [
@@ -45,7 +43,7 @@ function formatAge(s) {
   return m === 0 ? h + "h" : h + "h" + m + "m";
 }
 
-function usageFill(pct, dark) {
+function usageFill(pct) {
   if (pct == null) return null;
   if (pct >= 80) return "#e85555";
   if (pct >= 50) return "#d7a04a";
@@ -60,33 +58,36 @@ const dividerEl = document.querySelector(".divider");
 const usageRowEl = document.getElementById("usage-row");
 const usagePctEl = document.getElementById("usage-pct");
 const barFillEl = document.getElementById("bar-fill");
-const gifWrapEl = document.getElementById("gif-wrap");
-const gifEl = document.getElementById("gif");
 const entityWrapEl = document.getElementById("entity-wrap");
 const entityCanvasEl = document.getElementById("cube-entity");
 
 /* per-render cache: avoid stomping the DOM when nothing changed */
 const last = {
-  skin: null, theme: null,
+  theme: null,
   rowSig: null,
   usagePct: undefined,
-  gifKey: null,
   entityEmotion: null,
-  mediaSkin: null,   // tracks which media wrapper is visible (gif vs entity)
 };
+
+function setTheme(theme) {
+  if (!theme || theme === last.theme) return;
+  document.documentElement.setAttribute("data-theme", theme);
+  root.setAttribute("data-theme", theme);
+  last.theme = theme;
+}
 
 /* ───────────────────────────── Cube entity instance
  *
- * Lazily constructed on first cube-skin render so the renderer's RAF
- * loop doesn't burn cycles for waifu/orb users. setEmotion is the only
- * call needed per state change — params snap or tween based on
- * LERP_NUMERIC inside cube-entity.js.
+ * Lazily constructed on first render so the renderer's requestAnimationFrame
+ * loop doesn't start until DOM is wired. setEmotion is the only call needed
+ * per state change — params snap or tween based on LERP_NUMERIC inside
+ * cube-entity.js.
  */
 let entity = null;
 function ensureEntity() {
   if (entity) return entity;
   if (!entityCanvasEl || typeof CubeEntity === "undefined") return null;
-  // Canvas size = card inner width (wrap.clientWidth minus 12px padding both
+  // Canvas size = card inner width (wrap.clientWidth minus 12 px padding both
   // sides). Re-measured by ResizeObserver in attachAutoResize on width change.
   const wrap = document.querySelector(".wrap");
   const innerW = wrap ? wrap.clientWidth - 24 : 156;
@@ -98,25 +99,6 @@ function ensureEntity() {
   return entity;
 }
 
-function setSkinTheme(skin, theme) {
-  if (skin && skin !== last.skin) {
-    document.documentElement.setAttribute("data-skin", skin);
-    root.setAttribute("data-skin", skin);  // kept for backward-compat
-    last.skin = skin;
-  }
-  if (theme && theme !== last.theme) {
-    document.documentElement.setAttribute("data-theme", theme);
-    root.setAttribute("data-theme", theme);  // kept for backward-compat
-    last.theme = theme;
-  }
-}
-
-/* Compute the label subline for a session whose cwd appears more than
- * once in the current visible list. Label = first user message of the
- * Claude session (same identifier claude --resume shows), pre-truncated
- * by cube.sh to ~60 chars. CSS handles the ellipsis at card width.
- * Empty (= no subline) when label missing or cwd appears only once.
- */
 function sublineText(s, cwdCounts) {
   if ((cwdCounts.get(s.cwd) || 0) <= 1) return "";
   return s.label || "";
@@ -132,8 +114,6 @@ function sigOfSessions(sessions, cwdCounts) {
 }
 
 function renderRows(sessions) {
-  // Count cwd occurrences once per render so we can decide which rows
-  // need a subline. Counted over the full visible slice.
   const cwdCounts = new Map();
   for (const s of sessions) {
     cwdCounts.set(s.cwd, (cwdCounts.get(s.cwd) || 0) + 1);
@@ -141,7 +121,7 @@ function renderRows(sessions) {
 
   const sig = sigOfSessions(sessions, cwdCounts);
   if (sig === last.rowSig) {
-    /* still need to refresh ages every second since sig only buckets at 30s */
+    /* refresh ages every second since sig only buckets at 30 s */
     for (let i = 0; i < sessions.length; i++) {
       const s = sessions[i];
       if (AGELESS.has(s.state)) continue;
@@ -152,12 +132,8 @@ function renderRows(sessions) {
   }
   last.rowSig = sig;
 
-  /* full rebuild — small list, faster than diff-by-cwd */
   rowsEl.innerHTML = "";
   for (const s of sessions) {
-    // Each session is a 'block' element holding the main grid row + an
-    // optional subline beneath it. Block (not row) is the unit we append
-    // so the subline tracks with its parent row through sort changes.
     const block = document.createElement("div");
     block.className = "row-block";
 
@@ -166,9 +142,6 @@ function renderRows(sessions) {
 
     const dot = document.createElement("span");
     dot.className = "dot";
-    /* state attr drives --acc via CSS — avoids inline var() chains that
-       occasionally fail to re-resolve on theme/skin attribute swaps,
-       making dots invisible mid-transition. */
     dot.setAttribute("data-state", s.state);
     if (PULSE_STATES.has(s.state)) dot.setAttribute("data-live", "true");
 
@@ -203,12 +176,11 @@ function renderRows(sessions) {
 }
 
 function renderUsage(pct) {
-  /* In slim mode (hide_gif) the usage row is the only thing below the
-   * session list, so always show it — placeholder "—" while pct null
-   * (e.g. ccusage not running yet). In normal mode keep the auto-hide
-   * so a missing ccusage doesn't leave an empty "Use —" sitting above
-   * the GIF. */
-  const slim = !!ui.hide_gif;
+  /* In slim mode (hide_entity) the usage row is the only thing below the
+   * session list, so always show it — placeholder "—" while pct null (e.g.
+   * ccusage not running yet). In normal mode auto-hide so a missing ccusage
+   * doesn't leave an empty "Use —" sitting above the entity. */
+  const slim = !!ui.hide_entity;
   const sig = `${pct}|${slim ? 1 : 0}`;
   if (sig === last.usagePct) return;
   last.usagePct = sig;
@@ -218,7 +190,7 @@ function renderUsage(pct) {
     return;
   }
   usageRowEl.hidden = false;
-  dividerEl.hidden = slim;  /* divider only between rows and Use when GIF present */
+  dividerEl.hidden = slim;  /* divider only between rows and Use when entity present */
   if (pct == null) {
     usagePctEl.textContent = "—";
     barFillEl.style.width = "0%";
@@ -227,50 +199,7 @@ function renderUsage(pct) {
     usagePctEl.textContent = `${pct}%`;
     barFillEl.style.width = `${Math.max(0, Math.min(100, pct))}%`;
     const override = usageFill(pct);
-    barFillEl.style.background = override || "";  /* "" = inherit --bar-fill */
-  }
-}
-
-/* Media area: cube-skin shows the entity canvas, every other skin
- * falls back to the existing GIF wrapper. Toggle is keyed on skin so
- * theme swaps don't tear the canvas down. */
-function setMediaForSkin(skin) {
-  if (skin === last.mediaSkin) return;
-  last.mediaSkin = skin;
-  if (skin === "cube") {
-    if (gifWrapEl) gifWrapEl.hidden = true;
-    if (entityWrapEl) entityWrapEl.hidden = ui.hide_gif === true;
-    ensureEntity();
-  } else {
-    if (entityWrapEl) entityWrapEl.hidden = true;
-    if (entity) entity.pause();   // stop RAF accumulator → no CPU burn while hidden
-    // gif-wrap visibility owned by renderGif — it reveals when bytes arrive.
-  }
-}
-
-async function renderGif(img, ts) {
-  // Cube-skin uses the canvas entity, not a fetched GIF — bail before
-  // touching pywebview.api.gif (would 404 mock-cube's /current.gif since
-  // there is no cube_*.gif on disk).
-  if (last.skin === "cube") return;
-  const key = `${img}|${ts}|${ui.hide_gif ? "off" : "on"}`;
-  if (key === last.gifKey) return;
-  last.gifKey = key;
-  if (ui.hide_gif || !img) {
-    gifWrapEl.hidden = true;
-    return;
-  }
-  if (window.pywebview?.api?.gif) {
-    try {
-      const b64 = await window.pywebview.api.gif();
-      if (!b64) return;
-      gifEl.src = `data:image/gif;base64,${b64}`;
-      gifWrapEl.hidden = false;
-    } catch (e) {
-      console.warn("gif fetch failed", e);
-    }
-  } else {
-    gifWrapEl.hidden = true;  /* preview-mode: no GIF without bridge */
+    barFillEl.style.background = override || "";
   }
 }
 
@@ -278,10 +207,9 @@ async function renderGif(img, ts) {
  * setEmotion is cheap (config object spread + tween-capture) and the
  * renderer's RAF loop picks up the new params on the next frame. */
 function renderEntity(state) {
-  if (last.skin !== "cube") return;
   const ent = ensureEntity();
   if (!ent) return;
-  if (ui.hide_gif) {
+  if (ui.hide_entity) {
     if (entityWrapEl) entityWrapEl.hidden = true;
     ent.pause();
     return;
@@ -295,22 +223,18 @@ function renderEntity(state) {
   }
 }
 
-/* Bust render cache so next poll re-evaluates divider + gif visibility. */
 function invalidateRender() {
-  last.gifKey = null;
   last.usagePct = undefined;
   last.entityEmotion = null;
 }
 
 function render(data) {
   if (!data) return;
-  setSkinTheme(data.skin, data.theme);
-  setMediaForSkin(data.skin || last.skin);
+  setTheme(data.theme);
   const sessions = data.sessions || [];
   sessCountEl.textContent = String(sessions.length);
   renderRows(sessions);
   renderUsage(data.usage_5h_pct ?? null);
-  renderGif(data.img, data.ts);
   renderEntity(data.state);
 }
 
@@ -327,18 +251,14 @@ async function poll() {
     data = SAMPLE_DATA;  /* preview mode */
   }
   if (data) {
-    /* Sync server-driven skin into local UI (mock-cube derives from
-       ~/.claude/.cube-skin). Theme is local but mirrored back so a
-       reload from another instance picks up changes. */
     if (typeof ui !== "undefined") {
-      if (data.skin && data.skin !== ui.skin) { ui.skin = data.skin; applyUi(); }
       if (data.theme && data.theme !== ui.theme) { ui.theme = data.theme; applyUi(); }
       if (typeof data.locked === "boolean" && data.locked !== ui.locked) {
         ui.locked = data.locked;
         applyUi();
       }
-      if (typeof data.hide_gif === "boolean" && data.hide_gif !== ui.hide_gif) {
-        ui.hide_gif = data.hide_gif;
+      if (typeof data.hide_entity === "boolean" && data.hide_entity !== ui.hide_entity) {
+        ui.hide_entity = data.hide_entity;
         invalidateRender();
       }
       maybeLift(data.state);
@@ -348,21 +268,18 @@ async function poll() {
   setTimeout(poll, POLL_MS);
 }
 
-/* URL query lets a single static HTML preview the dark theme without
-   pywebview. e.g. file:///.../index.html?theme=dark&skin=orb */
+/* URL query lets a single static HTML preview a different theme without
+   pywebview. e.g. file:///.../index.html?theme=dark */
 function applyQueryOverrides() {
   const q = new URLSearchParams(location.search);
   const theme = q.get("theme");
-  const skin = q.get("skin");
-  if (theme || skin) setSkinTheme(skin || "waifu", theme || "light");
+  if (theme) setTheme(theme);
 }
-
 applyQueryOverrides();
 
-/* ───────────────────────────── Phase-2: client state */
+/* ───────────────────────────── client state */
 const ui = {
   theme: "light",
-  skin: "waifu",
   width: 180,
   locked: false,
   topmost: true,
@@ -370,14 +287,13 @@ const ui = {
   size_presets: [140, 180, 240],
   hide_winner: null,
   hidden: false,
-  hide_gif: false,
+  hide_entity: false,
 };
 const api = () => window.pywebview && window.pywebview.api;
 
 function applyUi() {
-  setSkinTheme(ui.skin, ui.theme);
+  setTheme(ui.theme);
   document.body.classList.toggle("draggable", !ui.locked);
-  setMediaForSkin(ui.skin);
 }
 
 /* ───────────────────────────── Drag */
@@ -388,21 +304,20 @@ function attachDrag() {
   if (!wrap) return;
 
   wrap.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return;            /* left-click only */
+    if (e.button !== 0) return;
     if (ui.locked) return;
     if (e.target.closest(".ctx-menu")) return;
     drag.active = true;
     document.body.classList.add("dragging");
-    /* Fire-and-forget. Python reads cursor pos via GetCursorPos so we
-       don't pass screenX/Y (WebView2 reports logical pixels which mismatch
-       SetWindowPos's physical-pixel coord space). */
+    /* Fire-and-forget. Python reads cursor pos via GetCursorPos so we don't
+       pass screenX/Y (WebView2 reports logical px which mismatch SetWindowPos's
+       physical-pixel coord space). */
     api()?.start_drag();
   });
 
-  /* Move/up bound on document so we keep tracking even if cursor leaves window. */
   document.addEventListener("mousemove", () => {
     if (!drag.active) return;
-    api()?.move_relative();   /* fire-and-forget; each call samples cursor fresh */
+    api()?.move_relative();
   });
   document.addEventListener("mouseup", () => {
     if (!drag.active) return;
@@ -412,10 +327,9 @@ function attachDrag() {
   });
 }
 
-/* ───────────────────────────── Menu (native Win32) */
-/* WebView2 frameless can't grow a DOM popup past the window's own bounds
-   (~180-240 px wide), so submenus got clipped. Native TrackPopupMenu on
-   the Python side lives outside the WebView2 surface — no constraint. */
+/* Menu is native Win32 (TrackPopupMenu) — frameless WebView2 clips DOM popups
+   past its own bounds, so we hand off to TrackPopupMenu which lives outside
+   the WebView2 surface. */
 function attachContextMenu() {
   document.addEventListener("contextmenu", (e) => {
     e.preventDefault();
@@ -423,10 +337,9 @@ function attachContextMenu() {
   });
 }
 
-/* Dynamic window height — report `.wrap` content height up to Python
-   whenever DOM size changes (renderRows, GIF onload, theme swap, etc.).
-   Python resizes the OS window keeping the bottom-right anchor stable
-   so the card "grows upward" rather than down off-screen. */
+/* Dynamic window height — report `.wrap` content height up to Python whenever
+   DOM size changes. Python resizes the OS window keeping the bottom-right
+   anchor stable so the card "grows upward" rather than down off-screen. */
 function attachAutoResize() {
   const wrap = document.querySelector(".wrap");
   if (!wrap || typeof ResizeObserver === "undefined") return;
@@ -441,8 +354,8 @@ function attachAutoResize() {
         api()?.resize_height(h);
       }
       // Cube-entity tracks card-width changes — re-size canvas's internal
-      // resolution to match its rendered px box so it stays crisp at
-      // every overlay size preset.
+      // resolution to match its rendered px box so it stays crisp at every
+      // overlay size preset.
       if (entity && entityCanvasEl) {
         const cssW = Math.round(entityCanvasEl.getBoundingClientRect().width);
         if (cssW && Math.abs(cssW - entity.size) > 2) entity.setSize(cssW);
@@ -453,7 +366,8 @@ function attachAutoResize() {
   if (entityCanvasEl) ro.observe(entityCanvasEl);
 }
 
-/* ───────────────────────────── Activity tracking (lift on activity) */
+/* Lift on activity: idle/done/start → pulse-state crossing brings the window
+   to front so a long-idle overlay surfaces when work resumes. */
 let activityState = { lastWinner: null };
 function maybeLift(newWinner) {
   if (!ui.lift) {
@@ -468,7 +382,6 @@ function maybeLift(newWinner) {
   activityState.lastWinner = newWinner;
 }
 
-/* ───────────────────────────── Bootstrap */
 async function bootstrap() {
   const bridge = api();
   if (bridge && bridge.initial_state) {
@@ -485,9 +398,9 @@ async function bootstrap() {
   poll();
 }
 
-/* pywebview injects the api asynchronously; window.pywebview is undefined
-   when the script first runs. Always listen for pywebviewready, plus a
-   fallback timer for plain-browser preview mode (no pywebview ever). */
+/* pywebview injects api asynchronously; window.pywebview is undefined when
+   the script first runs. Always listen for pywebviewready, plus a fallback
+   timer for plain-browser preview mode (no pywebview ever). */
 let _bootstrapped = false;
 function _kick() {
   if (_bootstrapped) return;
