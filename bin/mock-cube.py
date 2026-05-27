@@ -27,10 +27,24 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-STATE = {"img": "/image/idle.gif", "state": "idle", "theme": 3, "brt": 50, "ts": 0.0}
+SKIN_FILE = os.path.expanduser("~/.claude/.cube-skin")
+
+
+def read_skin_file(default="orb"):
+    try:
+        with open(SKIN_FILE) as f:
+            v = f.read().strip()
+        return v or default
+    except OSError:
+        return default
+
+
+STATE = {"img": "/image/idle.gif", "state": "idle", "theme": 3, "brt": 50, "ts": 0.0,
+         "skin": read_skin_file()}
 ASSETS_DIR = None  # set in main()
 KNOWN_STATES = {"idle", "thinking", "alert", "permission", "error", "compact", "done"}
 
@@ -115,6 +129,16 @@ def _read_sessions_list():
     return active + idle
 
 
+def _parse_iso(s):
+    """ISO-8601 → epoch seconds. ccusage emits `...Z`; fromisoformat needs +00:00."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
 def _refresh_usage():
     pct = None
     cmd = _find_ccusage_cmd()
@@ -130,17 +154,29 @@ def _refresh_usage():
             if out.returncode == 0 and out.stdout:
                 blocks = (json.loads(out.stdout).get("blocks") or [])
                 if blocks:
-                    # tokenLimitStatus.percentUsed is projection (burnRate * remainingMinutes).
-                    # We want actual current usage, so divide raw totalTokens by the
-                    # plan-specific token limit. ccusage's --token-limit max picks
-                    # the highest historical block — that rarely matches Anthropic's
-                    # actual Max-plan quota, so CUBE_USAGE_TOKEN_LIMIT can override.
-                    tls = blocks[0].get("tokenLimitStatus") or {}
-                    total = blocks[0].get("totalTokens")
-                    limit_env = os.environ.get("CUBE_USAGE_TOKEN_LIMIT")
-                    limit = int(limit_env) if limit_env else tls.get("limit")
-                    if total and limit:
-                        pct = int(round(total / limit * 100))
+                    blk = blocks[0]
+                    # ccusage --active sometimes hands back the last block even
+                    # when its 5h window already lapsed (e.g. yesterday-evening
+                    # block surfacing on next-morning startup). Verify the block
+                    # is actually live now before using its totals — otherwise
+                    # the overlay shows a stale % after a long idle gap.
+                    end_ts = _parse_iso(blk.get("endTime"))
+                    is_active = blk.get("isActive", True)
+                    stale = (not is_active) or (end_ts is not None and time.time() > end_ts)
+                    if stale:
+                        pct = 0
+                    else:
+                        # tokenLimitStatus.percentUsed is projection (burnRate * remainingMinutes).
+                        # We want actual current usage, so divide raw totalTokens by the
+                        # plan-specific token limit. ccusage's --token-limit max picks
+                        # the highest historical block — that rarely matches Anthropic's
+                        # actual Max-plan quota, so CUBE_USAGE_TOKEN_LIMIT can override.
+                        tls = blk.get("tokenLimitStatus") or {}
+                        total = blk.get("totalTokens")
+                        limit_env = os.environ.get("CUBE_USAGE_TOKEN_LIMIT")
+                        limit = int(limit_env) if limit_env else tls.get("limit")
+                        if total and limit:
+                            pct = int(round(total / limit * 100))
             else:
                 sys.stderr.write(f"ccusage rc={out.returncode}: {out.stderr[:200]}\n")
         except Exception as e:
@@ -190,17 +226,20 @@ def _proxy_set_skin(skin):
 
 
 def derive_skin(img_path):
-    """img=/image/waifu_thinking.gif -> 'waifu'.  img=/image/alert.gif -> 'orb'.
+    """img=/image/waifu_thinking.gif -> 'waifu'.  img=/image/alert.gif -> STATE['skin'].
     Orb uses unprefixed filenames (legacy convention); any other prefix is the
     skin name. Exposed in /dashboard.json so the Windows overlay can pick the
-    right palette without reading ~/.claude/.cube-skin off the WSL filesystem."""
+    right palette without reading ~/.claude/.cube-skin off the WSL filesystem.
+    Unprefixed filenames fall through to STATE['skin'] (read from
+    ~/.claude/.cube-skin at startup) so the overlay shows the right palette
+    immediately after mock-cube boots, before the first state-push arrives."""
     base = os.path.basename(img_path or "")
     name = base.rsplit(".", 1)[0]
     if "_" in name:
         prefix, suffix = name.split("_", 1)
         if suffix in KNOWN_STATES:
             return prefix
-    return "orb"
+    return STATE.get("skin") or "orb"
 
 
 def resolve_local(img_path):
@@ -258,6 +297,10 @@ class H(BaseHTTPRequestHandler):
                 # ~/.claude/.cube-skin (WSL source of truth) and cube.sh
                 # redisplay mirrors the new GIF back via CUBE_MIRROR —
                 # STATE.img updates on its own once the redisplay-push lands.
+                # Update STATE['skin'] optimistically so /dashboard.json
+                # reflects the new palette on the very next poll, without
+                # waiting for the redisplay round-trip.
+                STATE["skin"] = q["skin"][0]
                 threading.Thread(target=_proxy_set_skin,
                                  args=(q["skin"][0],), daemon=True).start()
             return self._send("OK")
