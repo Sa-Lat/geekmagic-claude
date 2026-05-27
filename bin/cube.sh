@@ -20,6 +20,15 @@
 # Revert target: alert/error/compact/permission -> prev_state (thinking/idle);
 #                done/start -> idle (hardcoded — task ended).
 #
+# Error debounce: PostToolUseFailure fires the moment a Bash tool fails, but
+# Claude often retries successfully in the same turn — the user only sees the
+# error.gif flash for an issue that resolved itself. CUBE_ERROR_GRACE (default
+# 3s) defers the entire mutate+push+revert. Any non-error state for the same
+# session during the window (or SessionEnd) drops the pending entry — silent
+# no-op. Persistent errors show after grace. Set CUBE_ERROR_GRACE=0 to disable.
+# Pending entries live in $PENDING_ERROR_FILE, keyed by sid with a ts token so
+# re-armed errors invalidate old deferred jobs without coordination.
+#
 # Skins: selector stored in ~/.claude/.cube-skin. Cube-side files are flat:
 #   orb    -> /image/<state>.gif         (no prefix, legacy default)
 #   waifu  -> /image/waifu_<state>.gif   (and dedicated permission/error/compact/done)
@@ -36,11 +45,13 @@ set -u
 TIMEOUT="${CUBE_TIMEOUT:-2}"
 SKIN_FILE="${CUBE_SKIN_FILE:-$HOME/.claude/.cube-skin}"
 SESSIONS_FILE="${CUBE_SESSIONS_FILE:-/tmp/.cube-sessions-$UID.json}"
+PENDING_ERROR_FILE="${CUBE_PENDING_ERROR_FILE:-/tmp/.cube-pending-errors-$UID.json}"
 SESSION_TTL="${CUBE_SESSION_TTL:-3600}"
 IDLE_TTL="${CUBE_IDLE_TTL:-600}"
 ALERT_REVERT="${CUBE_ALERT_REVERT:-5}"
 PERMISSION_REVERT="${CUBE_PERMISSION_REVERT:-$ALERT_REVERT}"
 ERROR_REVERT="${CUBE_ERROR_REVERT:-$ALERT_REVERT}"
+ERROR_GRACE="${CUBE_ERROR_GRACE:-3}"
 COMPACT_REVERT="${CUBE_COMPACT_REVERT:-$ALERT_REVERT}"
 DONE_REVERT="${CUBE_DONE_REVERT:-5}"
 START_REVERT="${CUBE_START_REVERT:-$DONE_REVERT}"
@@ -217,6 +228,97 @@ PY
   exec 9>&-
 }
 
+# Pending-error map: {<sid>: {"ts": <float>, "cwd": <str>, "label": <str>}}.
+# Used only by the error-debounce path. Each error overwrites its sid's entry
+# with a fresh ts; the deferred job claims by ts-match, so older deferred
+# jobs whose ts no longer matches no-op silently.
+pending_error_write() {
+  local sid="$1" cwd="$2" label="$3"
+  mkdir -p "$(dirname "$PENDING_ERROR_FILE")" 2>/dev/null || true
+  exec 8>"$PENDING_ERROR_FILE.lock"
+  flock -x 8 2>/dev/null || true
+  python3 - "$PENDING_ERROR_FILE" "$sid" "$cwd" "$label" <<'PY'
+import json, os, sys, tempfile, time
+path, sid, cwd, label = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    with open(path) as f: data = json.load(f)
+except Exception:
+    data = {}
+ts = time.time()
+data[sid] = {"ts": ts, "cwd": cwd, "label": label}
+d = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(dir=d, prefix=".cube-pe-", suffix=".tmp")
+with os.fdopen(fd, "w") as f: json.dump(data, f)
+os.replace(tmp, path)
+print(repr(ts))
+PY
+  flock -u 8 2>/dev/null || true
+  exec 8>&-
+}
+
+pending_error_clear() {
+  local sid="$1"
+  [[ -f "$PENDING_ERROR_FILE" ]] || return 0
+  exec 8>"$PENDING_ERROR_FILE.lock"
+  flock -x 8 2>/dev/null || true
+  python3 - "$PENDING_ERROR_FILE" "$sid" <<'PY' 2>/dev/null
+import json, os, sys, tempfile
+path, sid = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f: data = json.load(f)
+except Exception:
+    sys.exit()
+if sid not in data: sys.exit()
+del data[sid]
+d = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(dir=d, prefix=".cube-pe-", suffix=".tmp")
+with os.fdopen(fd, "w") as f: json.dump(data, f)
+os.replace(tmp, path)
+PY
+  flock -u 8 2>/dev/null || true
+  exec 8>&-
+}
+
+# Claim a pending entry by sid+ts match. Prints "<cwd>\t<label>" on success,
+# nothing on stale/missing. Removes the entry on success.
+pending_error_claim() {
+  local sid="$1" ts="$2"
+  [[ -f "$PENDING_ERROR_FILE" ]] || return 0
+  exec 8>"$PENDING_ERROR_FILE.lock"
+  flock -x 8 2>/dev/null || true
+  python3 - "$PENDING_ERROR_FILE" "$sid" "$ts" <<'PY' 2>/dev/null
+import json, os, sys, tempfile
+path, sid, want_ts = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path) as f: data = json.load(f)
+except Exception:
+    sys.exit()
+entry = data.get(sid)
+if not entry: sys.exit()
+if repr(entry.get("ts", 0)) != want_ts: sys.exit()
+del data[sid]
+d = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(dir=d, prefix=".cube-pe-", suffix=".tmp")
+with os.fdopen(fd, "w") as f: json.dump(data, f)
+os.replace(tmp, path)
+print(f"{entry.get('cwd','')}\t{entry.get('label','')}")
+PY
+  flock -u 8 2>/dev/null || true
+  exec 8>&-
+}
+
+# Real error path: mutate + push + revert. Used by show() when ERROR_GRACE=0
+# and by the deferred job after grace expires.
+do_error_now() {
+  local sid="$1" cwd="$2" label="$3" out winner seq
+  out=$(mutate update "$sid" "error" "$cwd" "$label")
+  winner="${out%%$'\t'*}"
+  seq="${out##*$'\t'}"
+  [[ "$seq" == "-1" ]] && return 0
+  push "$winner"
+  schedule_revert "$sid" "$seq" "$ERROR_REVERT" "@prev"
+}
+
 schedule_revert() {
   # schedule_revert <sid> <seq> <delay> [<target>]
   # target: literal state (default "idle") or "@prev" to read prev_state
@@ -287,6 +389,31 @@ PY
 )
     fi
   fi
+  # Any non-error state for this session invalidates a pending-error debounce.
+  # Catches the "Bash failed, Claude retried successfully" case: PostToolUseFailure
+  # arms the pending error, the next Stop/UserPromptSubmit (or even a follow-up
+  # compact/permission) clears it before grace expires — error.gif never shows.
+  if [[ "$new_state" != "error" ]]; then
+    pending_error_clear "$sid"
+  fi
+
+  # Defer error display by ERROR_GRACE so transient failures (resolved on retry)
+  # don't flash the error.gif. Skip the deferral if grace=0 — preserves the old
+  # immediate-error behavior for users who want it.
+  if [[ "$new_state" == "error" && "${ERROR_GRACE:-0}" -gt 0 ]]; then
+    local pe_ts claim
+    pe_ts=$(pending_error_write "$sid" "$cwd" "$label")
+    (
+      sleep "$ERROR_GRACE"
+      claim=$(pending_error_claim "$sid" "$pe_ts")
+      [[ -z "$claim" ]] && exit 0
+      IFS=$'\t' read -r c_cwd c_label <<<"$claim"
+      do_error_now "$sid" "$c_cwd" "$c_label"
+    ) </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    return 0
+  fi
+
   out=$(mutate update "$sid" "$new_state" "$cwd" "$label")
   winner="${out%%$'\t'*}"
   seq="${out##*$'\t'}"
@@ -308,6 +435,7 @@ end_session() {
   local hook_in="" sid cwd out winner
   [[ -t 0 ]] || hook_in=$(cat)
   IFS=$'\t' read -r sid cwd < <(parse_hook "$hook_in")
+  pending_error_clear "$sid"
   out=$(mutate evict "$sid")
   winner="${out%%$'\t'*}"
   push "$winner"
@@ -433,6 +561,8 @@ Env: CUBE_IP (required; or .env / ~/.config/cube/config),
      CUBE_ALERT_REVERT (default 5; 0 = forever),
      CUBE_PERMISSION_REVERT (default = ALERT_REVERT; 0 = forever),
      CUBE_ERROR_REVERT / CUBE_COMPACT_REVERT (default = ALERT_REVERT),
+     CUBE_ERROR_GRACE (default 3s; 0 = off — defers error display so a
+       Bash failure resolved on retry never flashes error.gif),
      CUBE_DONE_REVERT (default 5),
      CUBE_START_REVERT (default = DONE_REVERT),
      CUBE_RECAP_WINDOW (default 60s; 0 = off — suppresses post-compact done)

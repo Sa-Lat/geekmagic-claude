@@ -10,7 +10,7 @@ Verwandelt einen [GeekMagic SmallTV-Ultra](https://github.com/GeekMagicClock/sma
 | `Stop` (Antwort fertig) | `done.gif` | 5 s → idle | `task.complete` |
 | `Notification` | `alert.gif` | 5 s → prev_state | (varies) |
 | `PermissionRequest` | `permission.gif` (waifu) / `alert.gif` (orb) | 5 s → prev_state | `input.required` |
-| `PostToolUseFailure` (Bash) | `error.gif` (waifu) / `alert.gif` (orb) | 5 s → prev_state | `task.error` |
+| `PostToolUseFailure` (Bash) | `error.gif` (waifu) / `alert.gif` (orb) | 3 s grace + 5 s → prev_state | `task.error` |
 | `PreCompact` (Kontext voll) | `compact.gif` (waifu) / `alert.gif` (orb) | 5 s → prev_state | `resource.limit` |
 | `SessionEnd` | (Session-Eviction) | — | (cleanup) |
 
@@ -18,9 +18,13 @@ Verwandelt einen [GeekMagic SmallTV-Ultra](https://github.com/GeekMagicClock/sma
 sodass ein Bash-Fail während `thinking` zurück auf `thinking` revertet, nicht
 auf `idle`. `done`/`start` revertieren immer auf `idle` (Task-Ende /
 Session-Greeting). Wer `permission` lieber forever bis User-Reaktion will:
-`CUBE_PERMISSION_REVERT=0`. Hooks-Set spiegelt 1:1 das von
-[peon-ping](https://github.com/) (Audio-Sibling), so dass Cube und Sound im
-Gleichschritt feuern.
+`CUBE_PERMISSION_REVERT=0`. **Error-Debounce:** `error` wird `CUBE_ERROR_GRACE`s
+(default 3) verzögert, weil Claude failed Bash-Calls meist im selben Turn
+erfolgreich retried — jede andere State-Änderung der Session (z.B. nächster
+`thinking`/`done`) innerhalb der Grace verwirft den pending Error stillschweigend.
+Persistente Fehler erscheinen nach Grace. `CUBE_ERROR_GRACE=0` deaktiviert.
+Hooks-Set spiegelt 1:1 das von [peon-ping](https://github.com/) (Audio-Sibling),
+so dass Cube und Sound im Gleichschritt feuern.
 
 ### Skin-Preview
 
@@ -189,6 +193,7 @@ CUBE_ALERT_REVERT=60 cube.sh alert      # länger (default 5 s)
 CUBE_ALERT_REVERT=0 cube.sh alert       # disabled (alert bleibt forever)
 CUBE_PERMISSION_REVERT=0 cube.sh permission   # forever (default 5 s → prev_state)
 CUBE_ERROR_REVERT=10 cube.sh error      # default = CUBE_ALERT_REVERT
+CUBE_ERROR_GRACE=0 cube.sh error        # debounce aus (default 3 s; transient-retry-success unterdrückt error.gif)
 CUBE_COMPACT_REVERT=10 cube.sh compact  # default = CUBE_ALERT_REVERT
 CUBE_DONE_REVERT=10 cube.sh done        # default 5 s → idle
 CUBE_START_REVERT=10 cube.sh start      # default = CUBE_DONE_REVERT
