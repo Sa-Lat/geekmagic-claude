@@ -243,6 +243,7 @@ function setMediaForSkin(skin) {
     ensureEntity();
   } else {
     if (entityWrapEl) entityWrapEl.hidden = true;
+    if (entity) entity.pause();   // stop RAF accumulator → no CPU burn while hidden
     // gif-wrap visibility owned by renderGif — it reveals when bytes arrive.
   }
 }

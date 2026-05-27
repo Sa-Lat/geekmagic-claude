@@ -425,3 +425,8 @@ body.dragging, body.dragging * {
   width: 100%;
   height: auto;
 }
+/* `.entity-wrap { display: flex }` has the same specificity as the UA
+   stylesheet's `[hidden] { display: none }`, and the author rule wins —
+   so `entityWrap.hidden = true` from JS wouldn't actually hide it. Raise
+   specificity here to guarantee the toggle works. */
+.entity-wrap[hidden] { display: none; }

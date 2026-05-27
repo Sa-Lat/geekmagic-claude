@@ -663,7 +663,7 @@ class JsApi:
         win_m = self._mk_submenu([
             (ck_top, M["win_topmost"], "Always on Top", 0),
             (ck_lift, M["win_lift"], "Lift on Activity", 0),
-            (ck_gif, M["win_gif"], "Show GIF", 0),
+            (ck_gif, M["win_gif"], "Show Animation", 0),
             (0, M["win_front"], "Bring to Front", 0),
         ])
         root_m = self._mk_submenu([
