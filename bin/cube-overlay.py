@@ -8,7 +8,7 @@ Run:
   CUBE_OVERLAY_X=3700 CUBE_OVERLAY_Y=920 python3 bin/cube-overlay.py --frameless
 
 Env (defaults if CLI not given):
-  CUBE_OVERLAY_MOCK         default http://127.0.0.1:8080
+  CUBE_OVERLAY_MOCK         default http://127.0.0.1:8765
   CUBE_OVERLAY_X / _Y       legacy window position (migrated once)
   CUBE_OVERLAY_SIZE         gif edge length (0/unset = auto-fit to window width)
   CUBE_OVERLAY_WIDTH        window width    (default = max(180, size+2*pad))
@@ -348,7 +348,7 @@ def usage_label(pct):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mock", default=os.environ.get("CUBE_OVERLAY_MOCK", "http://127.0.0.1:8080"))
+    ap.add_argument("--mock", default=os.environ.get("CUBE_OVERLAY_MOCK", "http://127.0.0.1:8765"))
     ap.add_argument("--margin", type=int, default=20)
     ap.add_argument("--size", type=int,
                     default=int(os.environ.get("CUBE_OVERLAY_SIZE", 0)),

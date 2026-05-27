@@ -12,10 +12,10 @@ Endpoints:
   POST /doUpload               200 OK, body discarded
 
 Run:
-  python3 bin/mock-cube.py [--host 127.0.0.1] [--port 8080]
+  python3 bin/mock-cube.py [--host 127.0.0.1] [--port 8765]
 
 Then point cube.sh at it (parallel to real cube):
-  CUBE_MIRROR=127.0.0.1:8080
+  CUBE_MIRROR=127.0.0.1:8765
 """
 import argparse
 import glob
@@ -316,7 +316,7 @@ def main():
     # then 127.0.0.1. Use 0.0.0.0 to expose to Windows-host (WSL-IP route) for
     # bin/win/cube-overlay-win.pyw.
     ap.add_argument("--host", default=os.environ.get("CUBE_MOCK_HOST", "127.0.0.1"))
-    ap.add_argument("--port", type=int, default=int(os.environ.get("CUBE_MOCK_PORT", "8080")))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("CUBE_MOCK_PORT", "8765")))
     ap.add_argument(
         "--assets",
         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets"),

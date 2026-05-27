@@ -844,7 +844,7 @@ class JsApi:
 def main():
     env = read_overlay_env()
     default_port = env.get("CUBE_OVERLAY_PORT",
-                           os.environ.get("CUBE_OVERLAY_PORT", "8080"))
+                           os.environ.get("CUBE_OVERLAY_PORT", "8765"))
     default_mock = (os.environ.get("CUBE_OVERLAY_MOCK")
                     or env.get("CUBE_OVERLAY_MOCK"))
 

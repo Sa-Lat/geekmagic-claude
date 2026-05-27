@@ -195,7 +195,7 @@ CUBE_START_REVERT=10 cube.sh start      # default = CUBE_DONE_REVERT
 CUBE_SESSION_TTL=600 cube.sh ...        # stale-prune nach 10 min (default 3600)
 CUBE_SESSIONS_FILE=/tmp/foo.json …      # alternativer State-Store (für Tests)
 CUBE_SKIN=orb cube.sh thinking          # einmaliger skin-override
-CUBE_MIRROR=127.0.0.1:8080 cube.sh ...  # fan-out an Mock-Cube (Dev-Mode, comma-separated)
+CUBE_MIRROR=127.0.0.1:8765 cube.sh ...  # fan-out an Mock-Cube (Dev-Mode, comma-separated)
 CUBE_USAGE_TOKEN_LIMIT=155000000        # 5h-Token-Limit für Overlay-% (Max-Plan empirisch ~155M)
 ```
 
@@ -325,7 +325,7 @@ make deploy        # installiert mock-cube.py, cube-overlay.py + systemd-Units
 make dev-install   # aktiviert mock-cube + cube-overlay als systemd --user Service
 
 # fan-out cube.sh an den Mock einschalten:
-echo "CUBE_MIRROR=127.0.0.1:8080" >> ~/.config/cube/config
+echo "CUBE_MIRROR=127.0.0.1:8765" >> ~/.config/cube/config
 ```
 
 **Konfig**:
@@ -412,7 +412,7 @@ zurück. Native X11 (kein WSLg) hat den Trade-off nicht.
 Workarounds wenn unverzichtbar:
 - AutoHotkey-Skript auf Windows-Seite das das Overlay-Window-Class als
   topmost-ohne-focus-grab markiert (einmalige Einrichtung, ewig stabil)
-- Web-Overlay (HTML-Page die `localhost:8080/dashboard.json` pollt) statt Tk —
+- Web-Overlay (HTML-Page die `localhost:8765/dashboard.json` pollt) statt Tk —
   läuft im Windows-Browser, WSLg-immun, aber größeres Refactor
 - **Windows-natives Overlay** (`bin/win/cube-overlay-win.pyw` Tk, oder
   `bin/win/cube-overlay-win-html.pyw` HTML/WebView2, siehe unten) —
