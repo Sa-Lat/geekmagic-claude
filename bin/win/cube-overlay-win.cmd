@@ -5,6 +5,12 @@ REM  Not meant to run inside WSL. Run it from a Windows shell or
 REM  drop it into the Windows Startup folder:
 REM    Win+R -> shell:startup -> paste this file
 REM    (target: %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\)
+REM
+REM  COPY THE .CMD FILE — do NOT create a .lnk shortcut to the repo path.
+REM  Shortcuts pointing into \\wsl.localhost\... get the Mark-of-the-Web
+REM  treatment and trigger a SmartScreen "unknown publisher" dialog on
+REM  every login. The .cmd as a real file in the Startup folder is local
+REM  and runs silently.
 REM =============================================================
 REM
 REM Resolves pythonw.exe dynamically via the py-launcher so the file works

@@ -3,6 +3,12 @@ REM =============================================================
 REM  WINDOWS ONLY — autostart wrapper for cube-overlay-win-html.pyw.
 REM  Drop into Win+R -> shell:startup
 REM    (%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\)
+REM
+REM  COPY THE .CMD FILE — do NOT create a .lnk shortcut to the repo path.
+REM  Shortcuts pointing into \\wsl.localhost\... get the Mark-of-the-Web
+REM  treatment and trigger a SmartScreen "unknown publisher" dialog on
+REM  every login. The .cmd as a real file in the Startup folder is local
+REM  and runs silently.
 REM =============================================================
 REM
 REM HTML/pywebview variant. Requires:

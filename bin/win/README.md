@@ -88,12 +88,24 @@ Oder Datei in einen Windows-Pfad kopieren und per Doppelklick starten
 
 ### 5. Autostart (optional)
 
-Per Startup-Folder-Shortcut: `Win+R` → `shell:startup` öffnet
-`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`. Repo-Datei dort hin
-kopieren (oder via Symlink/Verknüpfung):
+`Win+R` → `shell:startup` öffnet
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`. Die
+`.cmd`-Datei dort **direkt hinkopieren** (nicht als `.lnk`-Verknüpfung
+auf den Repo-Pfad anlegen):
 
 - Tk-Variante: `bin/win/cube-overlay-win.cmd`
 - HTML-Variante: `bin/win/cube-overlay-win-html.cmd` (oder `.ps1`)
+
+> ⚠️ **Keine Verknüpfung verwenden.** Wenn der Startup-Eintrag eine
+> `.lnk`-Verknüpfung ist, die auf eine `.cmd` unter `\\wsl.localhost\…` (oder
+> einem anderen "fremden" Pfad) zeigt, markiert Windows die Datei via
+> Mark-of-the-Web als "aus unbekannter Quelle" und zeigt bei jedem Login eine
+> SmartScreen-Warnung an. Lösung: die `.cmd` **als physische Datei** in den
+> Startup-Folder kopieren — der dort liegende Pfad gilt als lokal und löst die
+> Warnung nicht aus. Updates dann per `copy bin\win\cube-overlay-win*.cmd
+> "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\"` (oder
+> NTFS-Symlink via `mklink`, falls ein Symlink unbedingt nötig ist — der wird
+> anders behandelt als `.lnk`).
 
 HTML-Wrapper pinnt Python auf `-3.13` via `CUBE_OVERLAY_PY` (überschreibbar
 falls neuere pythonnet-Wheels vorhanden), nutzt `CUBE_OVERLAY_UNC_HTML` als
