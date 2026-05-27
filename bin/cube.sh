@@ -468,16 +468,16 @@ case "${1:-}" in
   list)       "${CURL[@]}" "http://$CUBE_IP/filelist?dir=/image/" 2>&1 || true ;;
   skin)
     case "${2:-}" in
-      orb|waifu)
+      orb|waifu|cube)
         mkdir -p "$(dirname "$SKIN_FILE")"
         echo "$2" > "$SKIN_FILE"
         echo "skin: $2"
         ;;
       ""|show|status)
         echo "current: $(skin_get)"
-        echo "available: orb, waifu"
+        echo "available: orb, waifu, cube"
         ;;
-      *) echo "unknown skin: $2 (use orb|waifu)" >&2; exit 1 ;;
+      *) echo "unknown skin: $2 (use orb|waifu|cube)" >&2; exit 1 ;;
     esac
     ;;
   info)
@@ -536,7 +536,8 @@ Usage: $0 <command> [arg]
   redisplay                    Re-push current aggregated state (no mutation).
                                Used by cube-watchdog after device reboot.
   img <filename>               Show image (session-agnostic).
-  skin [orb|waifu]             Get / set mascot skin.
+  skin [orb|waifu|cube]        Get / set mascot skin. cube = HTML-overlay
+                               voxel-entity (canvas, no GIF on hardware).
   theme <1-7>                  1 Weather, 3 Album, 7 Simple.
   brt <-10..100>               Brightness (-10 = off).
   list                         List uploaded images.

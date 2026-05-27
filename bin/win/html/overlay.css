@@ -45,6 +45,9 @@ html, body {
     0 -1px 0 rgba(160,60,110,0.08) inset,
     0 6px 16px rgba(160,60,120,0.16);
   --dot-glow: none;  /* dark mode adds an outer glow */
+  /* cube-skin canvas chrome — overridden in cube×dark for cyan glow */
+  --entity-bg: #000;
+  --entity-shadow: 0 3px 10px rgba(0,0,0,0.25);
 }
 
 /* waifu × light (default) */
@@ -135,6 +138,62 @@ html, body {
   --acc-compact:    #b890ee;
   --acc-alert:      #ffa060;
   --acc-start:      #7e90ff;
+}
+
+/* cube × light — voxel entity skin. Cyan-accented chrome leans toward
+   the entity's core hue (cyan 188°) so the canvas reads as part of the
+   card instead of an inset. */
+:root[data-skin="cube"][data-theme="light"] {
+  --card:      #e6eef2;
+  --text:      #0f2a36;
+  --meta:      #3f6478;
+  --brand:     #0a6a86;
+  --brand-sub: #4a8298;
+  --divider:   #c8d8de;
+  --bar-track: #c8d8de;
+  --bar-fill:  #1aa4c4;
+  --usage-fg:  #064a60;
+  --subline:   #406878;
+  --acc-permission: #d54590;
+  --acc-thinking:   #1aa4c4;
+  --acc-done:       #4a9c3a;
+  --acc-idle:       #6c8a98;
+  --acc-error:      #d04a48;
+  --acc-compact:    #9852c8;
+  --acc-alert:      #d27a30;
+  --acc-start:      #4a78d6;
+}
+
+/* cube × dark — the entity's natural habitat. Near-black card so the
+   canvas's own dark background blends with the chrome and the core
+   glow reads as the brightest thing on screen. */
+:root[data-skin="cube"][data-theme="dark"] {
+  --card:      #0d1015;
+  --text:      #d8e8f0;
+  --meta:      #88a0b0;
+  --brand:     #5ce7ff;
+  --brand-sub: #4a7888;
+  --divider:   #1a2028;
+  --bar-track: #161c24;
+  --bar-fill:  #5ce7ff;
+  --usage-fg:  #5ce7ff;
+  --subline:   #6a8898;
+  --gif-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  --card-shadow:
+    0 1px 0 rgba(255,255,255,0.04) inset,
+    0 -1px 0 rgba(0,0,0,0.4) inset,
+    0 6px 18px rgba(0,0,0,0.5);
+  --dot-glow: 0 0 6px;
+  --entity-bg: #05070b;
+  --entity-shadow: 0 4px 14px rgba(0,200,240,0.10);
+  --acc-permission: #ec2483;
+  --acc-thinking:   #5ce7ff;
+  --acc-done:       #7fce5a;
+  --acc-idle:       #5e7888;
+  --acc-error:      #ff7060;
+  --acc-compact:    #b070e0;
+  --acc-alert:      #ffa060;
+  --acc-start:      #6890ff;
 }
 
 /* ───────────────────────────── card chrome */
@@ -344,4 +403,25 @@ body.dragging, body.dragging * {
   box-shadow: var(--gif-shadow);
   /* Pixel-art is nearest-neighbor; preserve sharp edges across DPI scaling. */
   image-rendering: pixelated;
+}
+
+/* ───────────────────────────── entity (cube skin)
+   DPR-aware canvas — JS owns intrinsic px (size × devicePixelRatio);
+   width:100% stretches CSS box to card-inner width, 1:1 aspect via the
+   square canvas. No image-rendering: pixelated — entity is anti-aliased
+   polygons, not pixel-art (smoothing keeps edges crisp). */
+.entity-wrap {
+  margin-top: 8px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--entity-bg);
+  box-shadow: var(--entity-shadow);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.entity {
+  display: block;
+  width: 100%;
+  height: auto;
 }

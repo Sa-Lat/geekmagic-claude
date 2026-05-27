@@ -209,7 +209,7 @@ TPM_RIGHTBUTTON = 0x0002
 # Menu item IDs (kept ≥100 to stay clear of common WM_COMMAND territory).
 MENU_IDS = {
     "theme_light": 100, "theme_dark": 101,
-    "skin_orb": 110, "skin_waifu": 111,
+    "skin_orb": 110, "skin_waifu": 111, "skin_cube": 112,
     "pos_lock": 120, "pos_reset": 121,
     "size_140": 130, "size_180": 131, "size_240": 132,
     "win_topmost": 140, "win_lift": 141, "win_front": 142,
@@ -649,6 +649,7 @@ class JsApi:
         skin_m = self._mk_submenu([
             (0, M["skin_orb"], "orb", 0),
             (0, M["skin_waifu"], "waifu", 0),
+            (0, M["skin_cube"], "cube", 0),
         ])
         pos_m = self._mk_submenu([
             (ck_lock, M["pos_lock"], "Locked", 0),
@@ -701,6 +702,8 @@ class JsApi:
             self.set_skin("orb")
         elif cmd_id == M["skin_waifu"]:
             self.set_skin("waifu")
+        elif cmd_id == M["skin_cube"]:
+            self.set_skin("cube")
         elif cmd_id == M["pos_lock"]:
             self.set_lock(not self.locked)
         elif cmd_id == M["pos_reset"]:
@@ -917,12 +920,20 @@ def main():
                        encoding="utf-8").read()
         js_doc = open(os.path.join(HTML_DIR, "overlay.js"),
                       encoding="utf-8").read()
+        entity_doc = open(os.path.join(HTML_DIR, "cube-entity.js"),
+                          encoding="utf-8").read()
     except OSError as e:
         sys.stderr.write(f"asset read failed: {e}\n")
         sys.exit(3)
     html_doc = html_doc.replace(
         '<link rel="stylesheet" href="overlay.css">',
         f"<style>\n{css_doc}\n</style>")
+    # cube-entity.js must inline BEFORE overlay.js — overlay.js references
+    # window.CubeEntity at import time (ensureEntity). External <script src>
+    # tags don't resolve in pywebview's html= mode (no base URL).
+    html_doc = html_doc.replace(
+        '<script src="cube-entity.js"></script>',
+        f"<script>\n{entity_doc}\n</script>")
     html_doc = html_doc.replace(
         '<script src="overlay.js"></script>',
         f"<script>\n{js_doc}\n</script>")

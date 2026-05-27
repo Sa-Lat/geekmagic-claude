@@ -18,8 +18,8 @@ const STATE_LABELS = {
 };
 
 const SAMPLE_DATA = {
-  skin: "waifu",
-  state: "permission",
+  skin: "cube",
+  state: "thinking",
   img: null,
   ts: 0,
   usage_5h_pct: 42,
@@ -62,6 +62,8 @@ const usagePctEl = document.getElementById("usage-pct");
 const barFillEl = document.getElementById("bar-fill");
 const gifWrapEl = document.getElementById("gif-wrap");
 const gifEl = document.getElementById("gif");
+const entityWrapEl = document.getElementById("entity-wrap");
+const entityCanvasEl = document.getElementById("cube-entity");
 
 /* per-render cache: avoid stomping the DOM when nothing changed */
 const last = {
@@ -69,7 +71,32 @@ const last = {
   rowSig: null,
   usagePct: undefined,
   gifKey: null,
+  entityEmotion: null,
+  mediaSkin: null,   // tracks which media wrapper is visible (gif vs entity)
 };
+
+/* ───────────────────────────── Cube entity instance
+ *
+ * Lazily constructed on first cube-skin render so the renderer's RAF
+ * loop doesn't burn cycles for waifu/orb users. setEmotion is the only
+ * call needed per state change — params snap or tween based on
+ * LERP_NUMERIC inside cube-entity.js.
+ */
+let entity = null;
+function ensureEntity() {
+  if (entity) return entity;
+  if (!entityCanvasEl || typeof CubeEntity === "undefined") return null;
+  // Canvas size = card inner width (wrap.clientWidth minus 12px padding both
+  // sides). Re-measured by ResizeObserver in attachAutoResize on width change.
+  const wrap = document.querySelector(".wrap");
+  const innerW = wrap ? wrap.clientWidth - 24 : 156;
+  entity = new CubeEntity(entityCanvasEl, {
+    size: Math.max(80, innerW),
+    emotion: "thinking",
+  });
+  window.__cubeOverlayEntity = entity;  // expose for demo / debugging
+  return entity;
+}
 
 function setSkinTheme(skin, theme) {
   if (skin && skin !== last.skin) {
@@ -204,7 +231,27 @@ function renderUsage(pct) {
   }
 }
 
+/* Media area: cube-skin shows the entity canvas, every other skin
+ * falls back to the existing GIF wrapper. Toggle is keyed on skin so
+ * theme swaps don't tear the canvas down. */
+function setMediaForSkin(skin) {
+  if (skin === last.mediaSkin) return;
+  last.mediaSkin = skin;
+  if (skin === "cube") {
+    if (gifWrapEl) gifWrapEl.hidden = true;
+    if (entityWrapEl) entityWrapEl.hidden = ui.hide_gif === true;
+    ensureEntity();
+  } else {
+    if (entityWrapEl) entityWrapEl.hidden = true;
+    // gif-wrap visibility owned by renderGif — it reveals when bytes arrive.
+  }
+}
+
 async function renderGif(img, ts) {
+  // Cube-skin uses the canvas entity, not a fetched GIF — bail before
+  // touching pywebview.api.gif (would 404 mock-cube's /current.gif since
+  // there is no cube_*.gif on disk).
+  if (last.skin === "cube") return;
   const key = `${img}|${ts}|${ui.hide_gif ? "off" : "on"}`;
   if (key === last.gifKey) return;
   last.gifKey = key;
@@ -226,20 +273,44 @@ async function renderGif(img, ts) {
   }
 }
 
+/* Drive the cube-entity from the winner state. Called every poll;
+ * setEmotion is cheap (config object spread + tween-capture) and the
+ * renderer's RAF loop picks up the new params on the next frame. */
+function renderEntity(state) {
+  if (last.skin !== "cube") return;
+  const ent = ensureEntity();
+  if (!ent) return;
+  if (ui.hide_gif) {
+    if (entityWrapEl) entityWrapEl.hidden = true;
+    ent.pause();
+    return;
+  }
+  if (entityWrapEl) entityWrapEl.hidden = false;
+  ent.resume();
+  const emo = (window.CUBE_STATE_TO_EMOTION && window.CUBE_STATE_TO_EMOTION[state]) || "idle";
+  if (emo !== last.entityEmotion) {
+    ent.setEmotion(emo);
+    last.entityEmotion = emo;
+  }
+}
+
 /* Bust render cache so next poll re-evaluates divider + gif visibility. */
 function invalidateRender() {
   last.gifKey = null;
   last.usagePct = undefined;
+  last.entityEmotion = null;
 }
 
 function render(data) {
   if (!data) return;
   setSkinTheme(data.skin, data.theme);
+  setMediaForSkin(data.skin || last.skin);
   const sessions = data.sessions || [];
   sessCountEl.textContent = String(sessions.length);
   renderRows(sessions);
   renderUsage(data.usage_5h_pct ?? null);
   renderGif(data.img, data.ts);
+  renderEntity(data.state);
 }
 
 /* ───────────────────────────── poll loop */
@@ -305,6 +376,7 @@ const api = () => window.pywebview && window.pywebview.api;
 function applyUi() {
   setSkinTheme(ui.skin, ui.theme);
   document.body.classList.toggle("draggable", !ui.locked);
+  setMediaForSkin(ui.skin);
 }
 
 /* ───────────────────────────── Drag */
@@ -367,9 +439,17 @@ function attachAutoResize() {
         lastH = h;
         api()?.resize_height(h);
       }
+      // Cube-entity tracks card-width changes — re-size canvas's internal
+      // resolution to match its rendered px box so it stays crisp at
+      // every overlay size preset.
+      if (entity && entityCanvasEl) {
+        const cssW = Math.round(entityCanvasEl.getBoundingClientRect().width);
+        if (cssW && Math.abs(cssW - entity.size) > 2) entity.setSize(cssW);
+      }
     });
   });
   ro.observe(wrap);
+  if (entityCanvasEl) ro.observe(entityCanvasEl);
 }
 
 /* ───────────────────────────── Activity tracking (lift on activity) */
