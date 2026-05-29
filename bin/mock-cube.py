@@ -12,7 +12,7 @@ Run:
   python3 bin/mock-cube.py [--host 127.0.0.1] [--port 8765]
 
 Bind to 0.0.0.0 so the Windows-host overlay can reach mock-cube across the
-WSL-IP boundary (cube-overlay-win-html.pyw resolves the WSL IP at startup):
+WSL-IP boundary (cube-overlay.pyw resolves the WSL IP at startup):
   CUBE_MOCK_HOST=0.0.0.0 python3 bin/mock-cube.py
 """
 import argparse

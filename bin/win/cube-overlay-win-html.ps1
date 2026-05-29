@@ -1,5 +1,5 @@
 # =============================================================
-#  WINDOWS ONLY — autostart wrapper for cube-overlay-win-html.pyw.
+#  WINDOWS ONLY — autostart wrapper for cube-overlay.pyw.
 #  PowerShell variant of cube-overlay-win-html.cmd.
 #
 #  Drop into Win+R -> shell:startup as either:
@@ -9,7 +9,9 @@
 #                       -File "<path>\cube-overlay-win-html.ps1"
 # =============================================================
 #
-# Requires: py -m pip install --user pywebview
+# Requires (on the Windows host):
+#   py -3.13 -m pip install --user pywebview
+#   py -3.13 -m pip install --user "webview-overlay @ git+https://github.com/Sa-Lat/webview-overlay.git"
 #
 # CUBE_OVERLAY_UNC_HTML override: set this env var to point at a
 # non-default WSL distro/user path. Default assumes Ubuntu + Linux
@@ -29,7 +31,7 @@ $pyw = & py $env:CUBE_OVERLAY_PY -c "import sys, os; print(os.path.join(os.path.
 # UNC path override, otherwise default to Ubuntu + matching username.
 if (-not $env:CUBE_OVERLAY_UNC_HTML) {
     $env:CUBE_OVERLAY_UNC_HTML =
-        "\\wsl.localhost\Ubuntu\home\$env:USERNAME\projects\cube\bin\win\cube-overlay-win-html.pyw"
+        "\\wsl.localhost\Ubuntu\home\$env:USERNAME\projects\cube\bin\win\cube-overlay.pyw"
 }
 
 # Start-Process detaches cleanly; pythonw.exe is GUI-subsystem so no

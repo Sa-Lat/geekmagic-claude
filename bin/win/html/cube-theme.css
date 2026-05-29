@@ -1,0 +1,69 @@
+/* cube theme — palette tokens for the webview-overlay base shell.
+ *
+ * base.css (from the webview-overlay package) is structure-only and reads
+ * every colour via var(--token, fallback). This file DEFINES those tokens —
+ * the cyan "Mochi Classic" light + dark palettes — plus the per-state accent
+ * mapping for the session dots. Loaded after base.css (cube passes it in
+ * OverlayConfig.assets), so these definitions paint over the fallbacks.
+ */
+
+:root,
+:root[data-theme="light"] {
+  --card:      #e6eef2;
+  --text:      #0f2a36;
+  --meta:      #3f6478;
+  --brand:     #0a6a86;
+  --brand-sub: #4a8298;
+  --divider:   #c8d8de;
+  --bar-track: #c8d8de;
+  --bar-fill:  #1aa4c4;
+  --usage-fg:  #064a60;
+  --subline:   #406878;
+  --dot-glow: none;
+  --entity-bg: #000;
+  --entity-shadow: 0 3px 10px rgba(0,0,0,0.25);
+  --acc-permission: #d54590;
+  --acc-thinking:   #1aa4c4;
+  --acc-done:       #4a9c3a;
+  --acc-idle:       #6c8a98;
+  --acc-error:      #d04a48;
+  --acc-compact:    #9852c8;
+  --acc-alert:      #d27a30;
+  --acc-start:      #4a78d6;
+}
+
+:root[data-theme="dark"] {
+  --card:      #0d1015;
+  --text:      #d8e8f0;
+  --meta:      #88a0b0;
+  --brand:     #5ce7ff;
+  --brand-sub: #4a7888;
+  --divider:   #1a2028;
+  --bar-track: #161c24;
+  --bar-fill:  #5ce7ff;
+  --usage-fg:  #5ce7ff;
+  --subline:   #6a8898;
+  --dot-glow: 0 0 6px;
+  --entity-bg: #05070b;
+  --entity-shadow: 0 4px 14px rgba(0,200,240,0.10);
+  --acc-permission: #ec2483;
+  --acc-thinking:   #5ce7ff;
+  --acc-done:       #7fce5a;
+  --acc-idle:       #5e7888;
+  --acc-error:      #ff7060;
+  --acc-compact:    #b070e0;
+  --acc-alert:      #ffa060;
+  --acc-start:      #6890ff;
+}
+
+/* Per-state accent for the dot. `--acc` is set by attribute (not inline style)
+   because a chained var() set inline occasionally fails to re-resolve on a
+   data-theme swap — plain rules sidestep that. */
+.dot[data-state="permission"] { --acc: var(--acc-permission); }
+.dot[data-state="thinking"]   { --acc: var(--acc-thinking); }
+.dot[data-state="done"]       { --acc: var(--acc-done); }
+.dot[data-state="idle"]       { --acc: var(--acc-idle); }
+.dot[data-state="error"]      { --acc: var(--acc-error); }
+.dot[data-state="compact"]    { --acc: var(--acc-compact); }
+.dot[data-state="alert"]      { --acc: var(--acc-alert); }
+.dot[data-state="start"]      { --acc: var(--acc-start); }

@@ -1,8 +1,14 @@
-# cube-overlay-win-html (Windows WebView2 overlay)
+# cube-overlay (Windows WebView2 overlay)
 
 Frameless always-on-top overlay window on the Windows host. Renders the
 voxel cube-entity canvas plus the active Claude-Code session list driven by
 mock-cube's `/dashboard.json` running inside WSL.
+
+The window machinery (drag, native menu, anchor persistence, poll loop, base
+HTML/CSS/JS) lives in the reusable **`webview-overlay`** pip package.
+`cube-overlay.pyw` is a thin launcher: it supplies cube's identity, palette
+(`html/cube-theme.css`) and the voxel renderer (`html/cube-entity.js`) via
+`OverlayConfig`, then calls `webview_overlay.run()`.
 
 ## Architektur
 
@@ -11,7 +17,7 @@ WSL: mock-cube.py (bind 0.0.0.0:8765) ← cube.sh ← Claude-Code-Hooks
                             │
                             │  http://<wsl-ip>:8765/dashboard.json
                             ▼
-Windows: pythonw.exe bin/win/cube-overlay-win-html.pyw  (pywebview + WebView2)
+Windows: pythonw.exe bin/win/cube-overlay.pyw  (pywebview + WebView2)
 ```
 
 WSL-IP wird beim Start via `wsl.exe hostname -I` aufgelöst und bei
@@ -24,7 +30,13 @@ Connection-Drift (≥3 verfehlte Polls) neu ermittelt.
 ```powershell
 py -3.13 --version    # genau 3.13 (pythonnet hat noch keine 3.14-Wheels)
 py -3.13 -m pip install --user pywebview
+py -3.13 -m pip install --user "webview-overlay @ git+https://github.com/Sa-Lat/webview-overlay.git"
 ```
+
+`webview-overlay` ist das ausgelagerte, wiederverwendbare Overlay-Package
+(eigenes Repo). Es bringt pywebview als Dependency mit; die obige
+Pinned-Python-Anweisung sicherstellt, dass beide im selben `py -3.13`
+landen, den der `.cmd`-Wrapper auflöst.
 
 Falls `py` fehlt: Python von [python.org](https://www.python.org/downloads/)
 oder Microsoft Store installieren. WebView2-Runtime ist auf aktuellen
@@ -53,7 +65,7 @@ JSON-Antwort = bereit.
 ### 4. Start
 
 ```powershell
-py -3.13 "\\wsl$\Ubuntu\home\<user>\projects\cube\bin\win\cube-overlay-win-html.pyw"
+py -3.13 "\\wsl$\Ubuntu\home\<user>\projects\cube\bin\win\cube-overlay.pyw"
 ```
 
 Oder Datei in einen Windows-Pfad kopieren und per Doppelklick starten
@@ -81,7 +93,7 @@ Inhalt der `cube-overlay-win-html.cmd`:
 @echo off
 wsl.exe --exec true >nul 2>&1
 for /f "delims=" %%P in ('py -3.13 -c "import sys,os; print(os.path.join(os.path.dirname(sys.executable),'pythonw.exe'))"') do set PYW=%%P
-if "%CUBE_OVERLAY_UNC_HTML%"=="" set CUBE_OVERLAY_UNC_HTML=\\wsl.localhost\Ubuntu\home\%USERNAME%\projects\cube\bin\win\cube-overlay-win-html.pyw
+if "%CUBE_OVERLAY_UNC_HTML%"=="" set CUBE_OVERLAY_UNC_HTML=\\wsl.localhost\Ubuntu\home\%USERNAME%\projects\cube\bin\win\cube-overlay.pyw
 start "" "%PYW%" "%CUBE_OVERLAY_UNC_HTML%"
 ```
 
@@ -151,15 +163,22 @@ Per-Maschine-Settings unter `%APPDATA%\cube\`:
   Compositing bricht Painting auf den meisten pywebview-Builds (DWM zeigt
   Content im Taskbar-Preview, eigentliches Fenster bleibt unsichtbar). Body-BG
   matcht Card-Farbe → rechteckige Fensterkanten verschmelzen mit der Card.
-- **Inline-Asset-Bundle** — CSS/JS (overlay.js + cube-entity.js) werden beim
-  Start in `index.html` injected und `html=...` an `webview.create_window`
-  übergeben. WebView2 kann `file://` von UNC-Paths (`\\wsl.localhost\...`)
-  nicht laden, pywebviews transienter HTTP-Server serviert inlined HTML
-  problemlos.
+- **Inline-Asset-Bundle** — das `webview-overlay`-Package injectet seine
+  Base-Assets (`base.css` + `overlay-base.js`) plus cubes Plugin-Assets
+  (`cube-entity.js` + `cube-theme.css`) beim Start in `index.html` und übergibt
+  `html=...` an `webview.create_window`. WebView2 kann `file://` von UNC-Paths
+  (`\\wsl.localhost\...`) nicht laden, pywebviews transienter HTTP-Server
+  serviert inlined HTML problemlos. (Package-Option `use_http_server=True`
+  schaltet alternativ auf pywebviews HTTP-Server um.)
+- **Cube als Plugin** — `cube-entity.js` exportiert `window.CubeEntity` +
+  `window.CUBE_STATE_TO_EMOTION`; `overlay-base.js` entdeckt den Renderer über
+  `OVERLAY_CONFIG.entityGlobal`. `cube-theme.css` definiert die Palette-Tokens,
+  die `base.css` per `var(--token, fallback)` referenziert.
 - **HWND-Discovery** — `window.native.Handle.ToInt64()` zuerst; bei Failure
-  Fallback auf `EnumWindows` mit PID-Filter.
-- **Preview im Browser** — `bin/win/html/index.html` direkt im Browser öffnen
-  zeigt `SAMPLE_DATA`; `?theme=dark`-Query erlaubt Theme-Variation ohne
+  Fallback auf `EnumWindows` mit PID-Filter (Titel pro Instanz eindeutig).
+- **Preview im Browser** — im `webview-overlay`-Repo:
+  `tests/preview/preview.html` direkt im Browser öffnen zeigt die Base-Shell
+  mit `OVERLAY_CONFIG.sampleData`; `?theme=dark` variiert das Theme ohne
   pywebview.
 
 ## Troubleshooting
@@ -183,7 +202,7 @@ Python ≠ 3.13? `CUBE_OVERLAY_PY` in der `.cmd` auf die richtige Version
 setzen oder direkt `py -X.Y` testen.
 
 **Window kommt nicht hoch, kein Fehler sichtbar**:
-`%TEMP%\cube-overlay-win-html.log` lesen — stderr wird dorthin geleitet,
+`%TEMP%\cube-overlay.log` lesen — stderr wird dorthin geleitet,
 inkl. `sys.excepthook`-Traceback bei Crashes. Häufige Ursachen:
 WebView2-Runtime fehlt (Edge installieren), pywebview-Version inkompatibel
 (`pip install --upgrade pywebview`), WSL nicht hochgefahren

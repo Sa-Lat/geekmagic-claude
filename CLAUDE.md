@@ -16,8 +16,10 @@ JS `<canvas>` entity.
 
 No hardware. No GIFs. No background daemons except mock-cube. The whole
 runtime is `cube.sh` (single bash script) + `mock-cube.py` (single Python
-stdlib HTTP server) + a Windows-native overlay (`cube-overlay-win-html.pyw`
-with pywebview/WebView2).
+stdlib HTTP server) + a Windows-native overlay. The overlay window machinery
+lives in the standalone, reusable **`webview-overlay`** pip package (separate
+repo); `bin/win/cube-overlay.pyw` is a thin launcher that supplies cube's
+identity, palette and voxel renderer and calls `webview_overlay.run()`.
 
 ## Architecture, three pieces
 
@@ -75,24 +77,28 @@ with pywebview/WebView2).
    Bind defaults to `127.0.0.1:8765`. For the Windows overlay set
    `CUBE_MOCK_HOST=0.0.0.0` so the WSL-host IP route works.
 
-3. **`bin/win/cube-overlay-win-html.pyw`** + `bin/win/html/` —
-   Windows-native frameless WebView2 window driven by pywebview. Polls
-   `/dashboard.json` every 500 ms, renders rows + usage + voxel-cube
-   canvas. `cube-entity.js` is the renderer: 33 voxel cubes in 3
-   concentric rings with a cyan core, 8 emotions mapped from dashboard
-   states (`thinking→thinking`, `permission→listening`, `done→happy`,
-   `idle→idle`, `error→error`, `compact→focused`, `alert→surprised`,
-   `start→curious`). `setEmotion` swaps the config atomically with a
-   ~600 ms tween on color + radial-pulse envelope; motion-language params
-   (orbitSpeed, shake, flash) snap instantly because the eye latches onto
-   continuous change.
+3. **`bin/win/cube-overlay.pyw`** (launcher) + `bin/win/html/` (plugin
+   assets), on top of the **`webview-overlay`** package — Windows-native
+   frameless WebView2 window driven by pywebview. The package owns the poll
+   loop (every 500 ms), row/usage rendering, drag, native Win32 menu,
+   per-monitor anchor persistence and WSL-IP resolution; it consumes any
+   `/dashboard.json` producer. Cube supplies two plugin assets via
+   `OverlayConfig.assets`:
+   - `cube-entity.js` — the renderer: 33 voxel cubes in 3 concentric rings
+     with a cyan core, 8 emotions mapped from dashboard states
+     (`thinking→thinking`, `permission→listening`, `done→happy`,
+     `idle→idle`, `error→error`, `compact→focused`, `alert→surprised`,
+     `start→curious`). Exports `window.CubeEntity` +
+     `window.CUBE_STATE_TO_EMOTION`; `overlay-base.js` discovers it via
+     `OVERLAY_CONFIG.entityGlobal`. `setEmotion` tweens color + radial-pulse
+     (~600 ms); motion params (orbitSpeed, shake, flash) snap.
+   - `cube-theme.css` — the cyan palette tokens (`--card`, `--acc-*`, …) that
+     the package's structure-only `base.css` reads via `var(--token, fallback)`.
 
-   WebView2 can't load `file://` from UNC paths
-   (`\\wsl.localhost\...`), so the pyw inlines `overlay.css`,
-   `cube-entity.js`, and `overlay.js` into the `index.html` document at
-   startup and passes the resulting string as `html=...` to
-   `webview.create_window`. pywebview's transient HTTP server handles
-   inlined HTML fine.
+   Asset delivery defaults to inline (`html=...`) — base + cube assets are
+   concatenated into one document at startup, sidestepping WebView2's inability
+   to load `file://` from UNC paths (`\\wsl.localhost\...`). The package's
+   `use_http_server=True` is an alternative.
 
    Per-machine settings live in `%APPDATA%\cube\overlay.env`
    (`CUBE_OVERLAY_THEME`, `_WIDTH`, `_POSITION_LOCKED`, `_HIDE_ENTITY`) +
@@ -157,21 +163,31 @@ curl -s http://127.0.0.1:8765/dashboard.json | jq .
 - ccusage subprocess is intentionally async + cached. Don't make
   `_read_usage_pct` block on the subprocess.
 
-## When changing the overlay (`bin/win/html/`)
+## When changing the overlay
 
-- `overlay.js` polls `pywebview.api.dashboard()` every `POLL_MS` (500).
-  Heavy work belongs in the JS — Python bridge is for OS-level things
-  (drag/menu/window).
-- `cube-entity.js` is self-contained (IIFE + window exports). Its
-  emotions are pruned to the 8 dashboard states; do not mix in editor-only
-  presets without confirming they map to a dashboard state.
-- Cube-entity tweens between emotions (~600 ms) by lerping color + radial-
-  pulse-envelope; motion-language params snap. If you add a new emotion,
-  decide which bucket each param belongs to.
-- All three assets (`overlay.css`, `cube-entity.js`, `overlay.js`) are
-  inlined by `cube-overlay-win-html.pyw` at startup. External `<script
-  src="…">` tags in `index.html` don't resolve under pywebview's
-  no-base-URL `html=` mode — they must inline through the pyw.
+The window shell (poll loop, rows, drag, menu, window mgmt, `base.css`,
+`overlay-base.js`, `index.html` template) lives in the separate
+**`webview-overlay`** repo — change it there, not here, and keep it generic
+(no cube-isms). Cube only owns the launcher + two plugin assets:
+
+- `bin/win/cube-overlay.pyw` — the launcher. Change `OverlayConfig(...)` here
+  for cube's identity, palette hexes, font, state semantics, usage thresholds,
+  or to launch a second instance (`--instance`). It must stay a thin config —
+  no window logic.
+- `bin/win/html/cube-entity.js` — self-contained renderer (IIFE + window
+  exports). Emotions pruned to the 8 dashboard states; don't mix in editor-only
+  presets without a dashboard-state mapping. Tweens ~600 ms (color + radial-
+  pulse); motion params snap. New emotion → decide which bucket each param is in.
+  Constructor + export shape (`window.CubeEntity`, `CUBE_STATE_TO_EMOTION`) is
+  the contract `overlay-base.js` discovers — don't break it.
+- `bin/win/html/cube-theme.css` — palette tokens only. `base.css` is
+  structure-only and reads them via `var(--token, fallback)`; a renamed/missing
+  token just falls back, so keep names in sync with `base.css`.
+
+Asset order matters: project JS is injected before the base script so
+`window.CubeEntity` exists when `overlay-base.js` reads it (the package handles
+this). When adding a state, update `pulse_states`/`ageless_states`/`state_labels`
+in the launcher AND the `--acc` mapping in `cube-theme.css`.
 
 ## Peon-ping synergy (audio sibling)
 

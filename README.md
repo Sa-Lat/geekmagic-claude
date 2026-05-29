@@ -37,7 +37,7 @@ state.
                         mock-cube.py /dashboard.json      (WSL service)
                                   │  http://<wsl-ip>:8765
                                   ▼
-            cube-overlay-win-html.pyw (Windows, pywebview/WebView2)
+            cube-overlay.pyw (Windows, webview-overlay + pywebview)
                                   │  cube-entity.js canvas + DOM rows
                                   ▼
                             you see the overlay
@@ -45,7 +45,9 @@ state.
 
 Two runtime components on the WSL side (`cube.sh` script + `mock-cube`
 systemd unit), one runtime component on the Windows side
-(`cube-overlay-win-html.pyw` started from `shell:startup`).
+(`cube-overlay.pyw` started from `shell:startup`). The overlay window itself
+is the reusable [`webview-overlay`](../webview-overlay) package — `cube-overlay.pyw`
+is a thin launcher supplying cube's entity, palette and config.
 
 ## Setup (WSL side)
 
@@ -85,6 +87,7 @@ guide. Short version:
 
 ```powershell
 py -3.13 -m pip install --user pywebview
+py -3.13 -m pip install --user "webview-overlay @ git+https://github.com/Sa-Lat/webview-overlay.git"
 copy bin\win\cube-overlay-win-html.cmd "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\"
 ```
 
@@ -94,15 +97,11 @@ button. Bottom-right anchor is per-monitor-layout, persisted in
 
 ## Browser-only preview (no pywebview, no WSL)
 
-`bin/win/html/index.html` opens directly in any browser and falls back to
-`SAMPLE_DATA` — useful for tweaking the look without the full stack:
-
-```bash
-xdg-open bin/win/html/index.html               # Linux
-start bin\win\html\index.html                  # Windows
-```
-
-Add `?theme=light` or `?theme=dark` to override the palette.
+The base overlay shell can be previewed in any browser from the
+`webview-overlay` repo — open `tests/preview/preview.html`, which falls back to
+`OVERLAY_CONFIG.sampleData`. Add `?theme=light` or `?theme=dark` to override the
+palette. (Cube's palette + entity load only inside the real overlay; the
+preview shows the package's base look.)
 
 ## Configuration
 
